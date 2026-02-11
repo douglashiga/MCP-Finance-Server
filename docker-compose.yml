@@ -14,8 +14,13 @@ services:
       TRADING_MODE: ${TRADING_MODE:-paper}       # 'paper' or 'live'
       TWS_SETTINGS_PATH: /home/ibgateway/Jts
       READ_ONLY_API: "yes"                       # Enforce read-only
+      VNC_SERVER_PASSWORD: password              # Enable VNC with this password
+      # Force API port to 4001 (Standard for Live Gateway)
+      # If using Paper, it might default to 4002, so we lock it here if possible,
+      # or just match what IB does.
+      # For now, let's align with the Live default: 4001.
     ports:
-      - "4001:4003"   # API port (4003 inside container mapped to 4001 on host)
+      - "4001:4003"   # API port (4003 inside -> 4001 host)
       - "5901:5900"   # VNC for debugging (optional)
     volumes:
       - ib-gateway-settings:/home/ibgateway/Jts  # Persist IB settings
