@@ -16,7 +16,7 @@ services:
       READ_ONLY_API: "yes"                       # Enforce read-only
     ports:
       - "4001:4003"   # API port (4003 inside container mapped to 4001 on host)
-      - "5900:5900"   # VNC for debugging (optional)
+      - "5901:5900"   # VNC for debugging (optional)
     volumes:
       - ib-gateway-settings:/home/ibgateway/Jts  # Persist IB settings
     healthcheck:
