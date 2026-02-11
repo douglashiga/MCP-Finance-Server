@@ -15,14 +15,14 @@ services:
       TWS_SETTINGS_PATH: /home/ibgateway/Jts
       READ_ONLY_API: "yes"                       # Enforce read-only
       VNC_SERVER_PASSWORD: password              # Enable VNC with this password
-      TWS_API_PORT: 4001                         # Force API port to 4001 (standard Live Gateway)
+      # Container ignores TWS_API_PORT, so we rely on default 4003 and map it.
     ports:
-      - "4001:4001"   # API port (4001 inside -> 4001 host)
+      - "4001:4003"   # API port (4003 inside -> 4001 host)
       - "5901:5900"   # VNC for debugging (optional)
     volumes:
       - ib-gateway-settings:/home/ibgateway/Jts  # Persist IB settings
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "4001"]
+      test: ["CMD", "nc", "-z", "127.0.0.1", "4003"]
       interval: 30s
       timeout: 5s
       retries: 5
@@ -36,11 +36,10 @@ services:
     container_name: mcp-finance
     restart: unless-stopped
     depends_on:
-      ib-gateway:
-        condition: service_healthy
+      - ib-gateway
     environment:
       - IB_HOST=ib-gateway       # Docker internal DNS → reaches ib-gateway container
-      - IB_PORT=4001             # IB Gateway API port inside the network
+      - IB_PORT=4003             # IB Gateway API port inside the network
       - IB_CLIENT_ID=1
 
       - LOG_LEVEL=INFO
