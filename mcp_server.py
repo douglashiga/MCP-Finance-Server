@@ -46,16 +46,21 @@ async def get_stock_price(symbol: str, exchange: str = None, currency: str = 'US
     Get real-time market price for a stock from Interactive Brokers.
 
     Use this tool when you need the CURRENT, LIVE price of a stock.
+    Accepts Yahoo Finance format (e.g. 'VOLV-B.ST', 'PETR4.SA') — auto-converts to IB format.
     For fundamentals (PE, EPS) use get_fundamentals instead.
 
     Parameters:
-        symbol: Stock ticker, e.g. 'AAPL', 'MSFT', 'TSLA'
-        exchange: Exchange routing (default: SMART for best execution)
-        currency: Currency code, e.g. 'USD', 'EUR'
+        symbol: Stock ticker. Accepts multiple formats:
+            - US stocks: 'AAPL', 'MSFT', 'TSLA'
+            - Brazilian: 'PETR4' or 'PETR4.SA'
+            - Swedish: 'VOLVB' or 'VOLV-B.ST'
+            - European: 'BMW.DE', 'MC.PA', 'ISP.MI'
+        exchange: Optional. Auto-detected from suffix if not provided.
+        currency: Optional. Auto-detected from suffix if not provided.
 
-    Returns: {"success": true, "data": {"symbol": "AAPL", "price": 150.25, "bid": 150.0, "ask": 150.5, "volume": 10000, "close": 149.0}}
+    Returns: {"success": true, "data": {"symbol": "AAPL", "exchange": "SMART", "currency": "USD", "price": 150.25, "close": 149.0}}
 
-    Example: get_stock_price("AAPL")
+    Example: get_stock_price("AAPL") or get_stock_price("VOLV-B.ST")
     """
     return await MarketService.get_price(symbol, exchange, currency)
 
@@ -332,6 +337,33 @@ Analyze:
 - Position concentration risk
 - Sector diversification (use get_company_info for each position)
 - Suggestions for rebalancing (hypothetical, read-only mode)
+"""
+
+
+@mcp.prompt()
+def ticker_format_guide() -> str:
+    """Guide on how to format stock tickers for different markets. Use this when unsure about the correct ticker format."""
+    return """## Stock Ticker Format Guide
+
+This server auto-converts Yahoo Finance format to Interactive Brokers format.
+You can use either format when calling tools like get_stock_price().
+
+| Market | Yahoo Format | IB Format | Example |
+|--------|-------------|-----------|----------|
+| US | AAPL | AAPL | get_stock_price("AAPL") |
+| Brazil | PETR4.SA | PETR4/BOVESPA | get_stock_price("PETR4.SA") or get_stock_price("PETR4") |
+| Sweden | VOLV-B.ST | VOLVB/SFB | get_stock_price("VOLV-B.ST") |
+| Germany | BMW.DE | BMW/IBIS | get_stock_price("BMW.DE") |
+| UK | SHEL.L | SHEL/LSE | get_stock_price("SHEL.L") |
+| France | MC.PA | MC/SBF | get_stock_price("MC.PA") |
+| Japan | 7203.T | 7203/TSE | get_stock_price("7203.T") |
+| Hong Kong | 0700.HK | 0700/SEHK | get_stock_price("0700.HK") |
+
+### Tips:
+- **US stocks**: Just use the ticker (AAPL, TSLA, AMZN)
+- **International**: Use Yahoo format with suffix (.SA, .ST, .DE, etc.)
+- **If a ticker fails**: Use search_symbol("company name") to find the correct format
+- **Yahoo Finance tools** (get_fundamentals, get_company_info): Always use Yahoo format (PETR4.SA, VOLV-B.ST)
 """
 
 

@@ -9,13 +9,55 @@ logger = logging.getLogger(__name__)
 
 class MarketService:
 
+    # Map of Yahoo/common suffixes to IB exchange codes
+    EXCHANGE_MAP = {
+        ".ST": ("SFB", "SEK"),       # Stockholm
+        ".SA": ("BOVESPA", "BRL"),    # Brazil
+        ".L":  ("LSE", "GBP"),        # London
+        ".DE": ("IBIS", "EUR"),       # Germany (Xetra)
+        ".PA": ("SBF", "EUR"),        # Paris
+        ".TO": ("TSE", "CAD"),        # Toronto
+        ".HK": ("SEHK", "HKD"),      # Hong Kong
+        ".T":  ("TSE", "JPY"),        # Tokyo
+        ".AX": ("ASX", "AUD"),        # Australia
+        ".MI": ("BVME", "EUR"),       # Milan
+        ".AS": ("AEB", "EUR"),        # Amsterdam
+        ".MC": ("BM", "EUR"),         # Madrid
+        ".CO": ("CSE", "DKK"),        # Copenhagen
+        ".HE": ("HEX", "EUR"),       # Helsinki
+        ".OL": ("OSE", "NOK"),       # Oslo
+    }
+
+    @staticmethod
+    def _normalize_symbol(symbol: str, exchange: str = None, currency: str = 'USD'):
+        """
+        Convert Yahoo/Bloomberg-style tickers to IB format.
+        Examples:
+            VOLV-B.ST  → symbol=VOLVB, exchange=SFB, currency=SEK
+            PETR4.SA   → symbol=PETR4, exchange=BOVESPA, currency=BRL
+            AMZN       → symbol=AMZN (unchanged)
+        """
+        for suffix, (ib_exchange, ib_currency) in MarketService.EXCHANGE_MAP.items():
+            if symbol.upper().endswith(suffix.upper()):
+                clean = symbol[:len(symbol) - len(suffix)]
+                clean = clean.replace("-", "")  # VOLV-B → VOLVB
+                return clean, exchange or ib_exchange, ib_currency
+
+        # No suffix: remove dashes anyway (some users type them)
+        clean = symbol.replace("-", "")
+        return clean, exchange, currency
+
     @staticmethod
     async def _resolve_contract(symbol: str, exchange: str = None, currency: str = 'USD') -> Contract:
         """
         Smart contract resolution:
-        1. Try direct qualification (fast path).
-        2. If fails, search IB for the symbol and use the best STK match.
+        1. Normalize the symbol (strip suffixes, convert dashes).
+        2. Try direct qualification (fast path).
+        3. If fails, search IB for the symbol and use the best STK match.
         """
+        symbol, exchange, currency = MarketService._normalize_symbol(symbol, exchange, currency)
+        logger.info(f"[RESOLVE] Normalized: {symbol}, exchange={exchange}, currency={currency}")
+
         # Fast path: direct qualification
         contract = Stock(symbol, exchange or "SMART", currency)
         try:
