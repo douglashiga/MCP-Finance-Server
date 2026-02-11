@@ -41,8 +41,12 @@ services:
       - IB_HOST=ib-gateway       # Docker internal DNS → reaches ib-gateway container
       - IB_PORT=4003             # IB Gateway API port inside the network
       - IB_CLIENT_ID=1
-
+      - MCP_TRANSPORT=sse        # SSE for HTTP access (LLM clients)
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8000
       - LOG_LEVEL=INFO
+    ports:
+      - "8000:8000"              # MCP SSE endpoint
     volumes:
       - ./logs:/app/logs
 

@@ -6,7 +6,10 @@ requires-python = ">=3.10"
 dependencies = [
     "mcp",
     "ib_insync",
-    "pandas"
+    "pandas",
+    "uvicorn",
+    "starlette",
+    "sse-starlette",
 ]
 
 [build-system]

@@ -29,7 +29,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Initialize MCP Server
-mcp = FastMCP("mcp-finance")
+MCP_HOST = os.environ.get('MCP_HOST', '0.0.0.0')
+MCP_PORT = int(os.environ.get('MCP_PORT', '8000'))
+MCP_TRANSPORT = os.environ.get('MCP_TRANSPORT', 'sse')  # 'sse' for network, 'stdio' for local
+
+mcp = FastMCP("mcp-finance", host=MCP_HOST, port=MCP_PORT)
 
 # ============================================================================
 # IBKR Tools (Real-time, Priority)
@@ -353,8 +357,10 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 
+    logger.info(f"[SERVER] Starting MCP Finance Server (transport={MCP_TRANSPORT}, host={MCP_HOST}, port={MCP_PORT})")
+
     try:
-        mcp.run()
+        mcp.run(transport=MCP_TRANSPORT)
     except KeyboardInterrupt:
         pass
     except Exception as e:
