@@ -65,21 +65,22 @@ class MarketService:
                 return {"success": False, "error": f"Contract not found: {symbol}. Try search_symbol('{symbol}') to find the correct ticker."}
 
             try:
-                tickers = await asyncio.wait_for(
-                    ib_conn.ib.reqTickersAsync(contract),
-                    timeout=TIMEOUT_MARKET
-                )
-            except asyncio.TimeoutError:
-                logger.error(f"[PRICE] Timeout fetching price for {symbol}")
-                return {"success": False, "error": "Timeout fetching market data"}
+                # Request market data (streams asynchronously)
+                ticker = ib_conn.ib.reqMktData(contract, genericTickList='', snapshot=False, regulatorySnapshot=False)
+
+                # Wait for data to arrive (IB pushes it asynchronously)
+                await asyncio.sleep(2)
+
+                # Cancel subscription (we only need a snapshot)
+                ib_conn.ib.cancelMktData(contract)
+
             except Exception as e:
                 logger.error(f"[PRICE] Error: {e}")
                 return {"success": False, "error": str(e)}
 
-        if not tickers:
+        if not ticker:
             return {"success": False, "error": f"No market data found for {symbol}"}
 
-        ticker = tickers[0]
         price = ticker.marketPrice()
 
         data = {
