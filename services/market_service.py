@@ -1,49 +1,47 @@
 import asyncio
+import json
 import logging
-from typing import Dict, Any, List
+import os
+import re
+from typing import Dict, Any, List, Tuple
 from ib_insync import Stock, Contract, util
 from core.connection import ib_conn, TIMEOUT_MARKET
 
 logger = logging.getLogger(__name__)
 
+# Load exchange map from JSON
+_MAP_PATH = os.path.join(os.path.dirname(__file__), '..', 'exchange_map.json')
+with open(_MAP_PATH) as f:
+    EXCHANGE_MAP: Dict[str, dict] = json.load(f)
+
 
 class MarketService:
 
-    # Map of Yahoo/common suffixes to IB exchange codes
-    EXCHANGE_MAP = {
-        ".ST": ("SFB", "SEK"),       # Stockholm
-        ".SA": ("BOVESPA", "BRL"),    # Brazil
-        ".L":  ("LSE", "GBP"),        # London
-        ".DE": ("IBIS", "EUR"),       # Germany (Xetra)
-        ".PA": ("SBF", "EUR"),        # Paris
-        ".TO": ("TSE", "CAD"),        # Toronto
-        ".HK": ("SEHK", "HKD"),      # Hong Kong
-        ".T":  ("TSE", "JPY"),        # Tokyo
-        ".AX": ("ASX", "AUD"),        # Australia
-        ".MI": ("BVME", "EUR"),       # Milan
-        ".AS": ("AEB", "EUR"),        # Amsterdam
-        ".MC": ("BM", "EUR"),         # Madrid
-        ".CO": ("CSE", "DKK"),        # Copenhagen
-        ".HE": ("HEX", "EUR"),       # Helsinki
-        ".OL": ("OSE", "NOK"),       # Oslo
-    }
-
     @staticmethod
-    def _normalize_symbol(symbol: str, exchange: str = None, currency: str = 'USD'):
+    def _normalize_symbol(symbol: str, exchange: str = None, currency: str = 'USD') -> Tuple[str, str, str]:
         """
-        Convert Yahoo/Bloomberg-style tickers to IB format.
-        Examples:
-            VOLV-B.ST  → symbol=VOLVB, exchange=SFB, currency=SEK
-            PETR4.SA   → symbol=PETR4, exchange=BOVESPA, currency=BRL
-            AMZN       → symbol=AMZN (unchanged)
-        """
-        for suffix, (ib_exchange, ib_currency) in MarketService.EXCHANGE_MAP.items():
-            if symbol.upper().endswith(suffix.upper()):
-                clean = symbol[:len(symbol) - len(suffix)]
-                clean = clean.replace("-", "")  # VOLV-B → VOLVB
-                return clean, exchange or ib_exchange, ib_currency
+        Clean Yahoo/Bloomberg-style ticker → IB format using regex + JSON map.
 
-        # No suffix: remove dashes anyway (some users type them)
+        Examples:
+            VOLV-B.ST  → VOLVB, SFB, SEK
+            PETR4.SA   → PETR4, BOVESPA, BRL
+            BMW.DE     → BMW, IBIS, EUR
+            AAPL       → AAPL, None, USD  (unchanged)
+        """
+        # Regex: split on the LAST dot to get base and suffix
+        match = re.match(r'^(.+)\.([A-Z]{1,2})$', symbol.upper())
+
+        if match:
+            base = match.group(1)
+            suffix = match.group(2)
+
+            if suffix in EXCHANGE_MAP:
+                info = EXCHANGE_MAP[suffix]
+                clean = base.replace("-", "")  # VOLV-B → VOLVB
+                logger.info(f"[NORMALIZE] {symbol} → {clean} on {info['exchange']} ({info['currency']}) [{info['name']}]")
+                return clean, exchange or info["exchange"], info["currency"]
+
+        # No suffix matched: just clean dashes
         clean = symbol.replace("-", "")
         return clean, exchange, currency
 
@@ -56,7 +54,6 @@ class MarketService:
         3. If fails, search IB for the symbol and use the best STK match.
         """
         symbol, exchange, currency = MarketService._normalize_symbol(symbol, exchange, currency)
-        logger.info(f"[RESOLVE] Normalized: {symbol}, exchange={exchange}, currency={currency}")
 
         # Fast path: direct qualification
         contract = Stock(symbol, exchange or "SMART", currency)
