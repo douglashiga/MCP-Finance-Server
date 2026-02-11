@@ -10,19 +10,15 @@ from mcp.client.sse import sse_client
 
 URL = os.environ.get("MCP_URL", "http://localhost:8000/sse")
 
-# IB usa "PETR4" + exchange "BOVESPA"
-# Yahoo usa "PETR4.SA"
-IB_SYMBOL = "PETR4"
-YAHOO_SYMBOL = "PETR4.SA"
+# Testa ambos os mercados sem precisar especificar exchange!
+SYMBOLS = ["PETR4", "AMZN"]
 
 
 def pretty(data):
-    """Print JSON formatado."""
     print(json.dumps(data, indent=2, ensure_ascii=False, default=str))
 
 
 async def call(session, tool_name, args):
-    """Chama um tool e retorna o JSON."""
     r = await session.call_tool(tool_name, args)
     return json.loads(r.content[0].text)
 
@@ -35,65 +31,39 @@ async def test():
             await session.initialize()
             print("✅ Conectado!\n")
 
-            # 1. Listar tools
             tools = await session.list_tools()
-            print(f"🔧 {len(tools.tools)} tools disponíveis:")
-            for t in tools.tools:
-                print(f"   - {t.name}")
+            print(f"🔧 {len(tools.tools)} tools disponíveis\n")
 
-            # ========== IB Tools (usa PETR4 + BOVESPA) ==========
+            for symbol in SYMBOLS:
+                print(f"{'='*60}")
+                print(f"📈 Testando: {symbol}")
+                print(f"{'='*60}")
 
-            # 2. search_symbol
-            print(f"\n{'='*60}")
-            print(f"🔍 search_symbol('{IB_SYMBOL}')  [IB]")
-            print(f"{'='*60}")
-            data = await call(session, "search_symbol", {"query": IB_SYMBOL})
-            pretty(data)
+                # search
+                print(f"\n🔍 search_symbol('{symbol}')")
+                data = await call(session, "search_symbol", {"query": symbol})
+                pretty(data)
 
-            # 3. get_stock_price
-            print(f"\n{'='*60}")
-            print(f"💰 get_stock_price('{IB_SYMBOL}', exchange='BOVESPA', currency='BRL')  [IB]")
-            print(f"{'='*60}")
-            data = await call(session, "get_stock_price", {
-                "symbol": IB_SYMBOL,
-                "exchange": "BOVESPA",
-                "currency": "BRL"
-            })
-            pretty(data)
+                # price (sem exchange! auto-detecta)
+                print(f"\n💰 get_stock_price('{symbol}')")
+                data = await call(session, "get_stock_price", {"symbol": symbol})
+                pretty(data)
 
-            # ========== Yahoo Tools (usa PETR4.SA) ==========
+                # fundamentals (Yahoo)
+                yahoo_sym = f"{symbol}.SA" if symbol == "PETR4" else symbol
+                print(f"\n📊 get_fundamentals('{yahoo_sym}')")
+                data = await call(session, "get_fundamentals", {"symbol": yahoo_sym})
+                pretty(data)
 
-            # 4. get_fundamentals
-            print(f"\n{'='*60}")
-            print(f"📊 get_fundamentals('{YAHOO_SYMBOL}')  [Yahoo]")
-            print(f"{'='*60}")
-            data = await call(session, "get_fundamentals", {"symbol": YAHOO_SYMBOL})
-            pretty(data)
+                print()
 
-            # 5. get_company_info
-            print(f"\n{'='*60}")
-            print(f"🏢 get_company_info('{YAHOO_SYMBOL}')  [Yahoo]")
-            print(f"{'='*60}")
-            data = await call(session, "get_company_info", {"symbol": YAHOO_SYMBOL})
-            pretty(data)
-
-            # 6. get_dividends
-            print(f"\n{'='*60}")
-            print(f"💵 get_dividends('{YAHOO_SYMBOL}')  [Yahoo]")
-            print(f"{'='*60}")
-            data = await call(session, "get_dividends", {"symbol": YAHOO_SYMBOL})
-            pretty(data)
-
-            print(f"\n✅ Todos os testes finalizados!")
-            print(f"   IB:    {IB_SYMBOL} (exchange BOVESPA)")
-            print(f"   Yahoo: {YAHOO_SYMBOL}")
+            print("✅ Testes finalizados!")
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(test())
     except ConnectionRefusedError:
-        print("❌ Conexão recusada. O Docker está rodando?")
-        print("   docker compose up -d --build")
+        print("❌ Conexão recusada. Docker rodando?")
     except Exception as e:
         print(f"❌ Erro: {e}")
