@@ -1,0 +1,49 @@
+services:
+
+  # ============================================================
+  # IB Gateway (headless) — runs the Interactive Brokers Gateway
+  # ============================================================
+  ib-gateway:
+    image: ghcr.io/gnzsnz/ib-gateway:latest
+    container_name: ib-gateway
+    restart: unless-stopped
+    environment:
+      # Your IB credentials (use .env file for security!)
+      TWS_USERID: ${TWS_USERID}
+      TWS_PASSWORD: ${TWS_PASSWORD}
+      TRADING_MODE: ${TRADING_MODE:-paper}       # 'paper' or 'live'
+      TWS_SETTINGS_PATH: /home/ibgateway/Jts
+      READ_ONLY_API: "yes"                       # Enforce read-only
+    ports:
+      - "4001:4003"   # API port (4003 inside container mapped to 4001 on host)
+      - "5900:5900"   # VNC for debugging (optional)
+    volumes:
+      - ib-gateway-settings:/home/ibgateway/Jts  # Persist IB settings
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "4003"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ============================================================
+  # MCP Finance Server — connects to IB Gateway container
+  # ============================================================
+  mcp-finance:
+    build: .
+    container_name: mcp-finance
+    restart: unless-stopped
+    depends_on:
+      ib-gateway:
+        condition: service_healthy
+    environment:
+      - IB_HOST=ib-gateway       # Docker internal DNS → reaches ib-gateway container
+      - IB_PORT=4003             # IB Gateway API port inside the network
+      - IB_CLIENT_ID=1
+
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./logs:/app/logs
+
+volumes:
+  ib-gateway-settings:
