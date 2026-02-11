@@ -16,9 +16,12 @@ class MarketService:
         async with ib_conn.market_semaphore:
             try:
                 # Validation: Qualify the contract
-                await asyncio.wait_for(ib_conn.ib.qualifyContractsAsync(contract), timeout=2.0)
+                await asyncio.wait_for(ib_conn.ib.qualifyContractsAsync(contract), timeout=5.0)
             except Exception as e:
                 return {"success": False, "error": f"Invalid Symbol/Contract: {symbol}. {e}"}
+
+            if contract.conId == 0:
+                return {"success": False, "error": f"Contract not found: {symbol} on {exchange or 'SMART'} ({currency}). Try a different exchange (e.g. BVMF for Brazil, LSE for London)."}
 
             try:
                 tickers = await asyncio.wait_for(
