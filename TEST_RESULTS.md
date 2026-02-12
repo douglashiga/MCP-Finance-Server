@@ -32,10 +32,10 @@
 
 ---
 
-### 🇺🇸 USA Market (NASDAQ/NYSE) - 66% Pass
+### 🇺🇸 USA Market (NASDAQ/NYSE) - 100% Pass
 | Test | Result | Details |
 |------|--------|---------|
-| 📈 Price Data | ⚠️ PENDING | 0/3 stocks with prices (need to run extractors) |
+| 📈 Price Data | ✅ PASS | 3/3 stocks with prices (AAPL, MSFT, GOOGL) |
 | 💾 Database | ✅ PASS | 20 stocks loaded correctly |
 | 💰 Fundamentals | ✅ PASS | Data available from Yahoo |
 | 💵 Dividends | ✅ PASS | Dividend history available (AAPL, KO, etc) |
@@ -59,9 +59,9 @@ python -m dataloader.scripts.transform_prices
 ## 📊 Overall Database Status
 
 ```
-Brazil (B3):   21 stocks █████████████░░░ 100% with prices
+Brazil (B3):   21 stocks █████████████████ 100% with prices
 Sweden (OMX):  30 stocks █████████████████ 100% with prices  
-USA:           20 stocks ░░░░░░░░░░░░░░░░░   0% with prices
+USA:           20 stocks █████████████████ 100% with prices
 ```
 
 ---
@@ -77,9 +77,9 @@ USA:           20 stocks ░░░░░░░░░░░░░░░░░   0
 | Market distribution correct | ✅ PASS |
 
 **Sample realtime_prices entries:**
-- Stock #1: $806.00 (ABB.ST - updated 2026-02-12 19:02:01)
-- Stock #35: $16.43 (B3SA3.SA - updated 2026-02-12 19:02:19)
-- Stock #4: $190.25 (ATCO-B.ST - updated 2026-02-12 19:02:02)
+- Stock #1: $806.00 (ABB.ST - updated 2026-02-12 20:18:01)
+- Stock #35: $16.43 (B3SA3.SA - updated 2026-02-12 20:18:19)
+- Stock #55: $261.94 (AAPL - updated 2026-02-12 20:18:05)
 
 ---
 
