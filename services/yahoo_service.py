@@ -55,72 +55,96 @@ class YahooService:
 
     @staticmethod
     def get_fundamentals(symbol: str) -> Dict[str, Any]:
-        """Get fundamental data: PE, EPS, Market Cap, Revenue, etc."""
-        logger.info(f"[YAHOO:FUNDAMENTALS] {symbol}")
+        """Get fundamental data from local database (populated by ELT pipeline)."""
+        from dataloader.database import SessionLocal
+        from dataloader.models import Stock, Fundamental
+        
+        logger.info(f"[YAHOO:FUNDAMENTALS] {symbol} from local DB")
+        
+        session = SessionLocal()
         try:
-            yf = _get_yf()
-            ticker = yf.Ticker(symbol)
-            info = ticker.info
-
+            stock = session.query(Stock).filter_by(symbol=symbol).first()
+            
+            if not stock:
+                logger.info(f"[FUNDAMENTALS] Stock {symbol} not found in local DB")
+                return {"success": False, "error": f"Stock {symbol} not found in database"}
+            
+            # Get latest fundamental record
+            fundamental = session.query(Fundamental).filter_by(
+                stock_id=stock.id
+            ).order_by(Fundamental.fetched_at.desc()).first()
+            
+            if not fundamental:
+                logger.info(f"[FUNDAMENTALS] No fundamental data for {symbol}")
+                return {"success": False, "error": f"No fundamental data available for {symbol}"}
+            
             data = {
                 "symbol": symbol,
-                "shortName": info.get("shortName"),
-                "sector": info.get("sector"),
-                "industry": info.get("industry"),
-                "marketCap": info.get("marketCap"),
-                "enterpriseValue": info.get("enterpriseValue"),
-                "trailingPE": info.get("trailingPE"),
-                "forwardPE": info.get("forwardPE"),
-                "trailingEps": info.get("trailingEps"),
-                "forwardEps": info.get("forwardEps"),
-                "pegRatio": info.get("pegRatio"),
-                "priceToBook": info.get("priceToBook"),
-                "revenue": info.get("totalRevenue"),
-                "grossMargins": info.get("grossMargins"),
-                "ebitdaMargins": info.get("ebitdaMargins"),
-                "profitMargins": info.get("profitMargins"),
-                "returnOnEquity": info.get("returnOnEquity"),
-                "debtToEquity": info.get("debtToEquity"),
-                "freeCashflow": info.get("freeCashflow"),
-                "beta": info.get("beta"),
-                "fiftyTwoWeekHigh": info.get("fiftyTwoWeekHigh"),
-                "fiftyTwoWeekLow": info.get("fiftyTwoWeekLow"),
+                "shortName": stock.name,
+                "sector": stock.sector,
+                "industry": stock.industry,
+                "marketCap": fundamental.market_cap,
+                "enterpriseValue": fundamental.enterprise_value,
+                "trailingPE": fundamental.trailing_pe,
+                "forwardPE": fundamental.forward_pe,
+                "trailingEps": fundamental.trailing_eps,
+                "forwardEps": fundamental.forward_eps,
+                "pegRatio": fundamental.peg_ratio,
+                "priceToBook": fundamental.price_to_book,
+                "revenue": fundamental.revenue,
+                "grossMargins": fundamental.gross_margin,
+                "profitMargins": fundamental.net_margin,
+                "returnOnEquity": fundamental.roe,
+                "debtToEquity": fundamental.debt_to_equity,
+                "freeCashflow": fundamental.free_cash_flow,
+                "fetched_at": fundamental.fetched_at.isoformat() if fundamental.fetched_at else None,
+                "source": "local_database",
             }
             return {"success": True, "data": data}
-        except Exception as e:
-            logger.error(f"[YAHOO:FUNDAMENTALS] Error: {e}")
-            return {"success": False, "error": str(e)}
+        finally:
+            session.close()
 
     @staticmethod
     def get_dividends(symbol: str) -> Dict[str, Any]:
-        """Get dividend history and yield."""
-        logger.info(f"[YAHOO:DIVIDENDS] {symbol}")
+        """Get dividend history from local database (populated by ELT pipeline)."""
+        from dataloader.database import SessionLocal
+        from dataloader.models import Stock, Dividend
+        
+        logger.info(f"[YAHOO:DIVIDENDS] {symbol} from local DB")
+        
+        session = SessionLocal()
         try:
-            yf = _get_yf()
-            ticker = yf.Ticker(symbol)
-            info = ticker.info
-            dividends = ticker.dividends
-
+            stock = session.query(Stock).filter_by(symbol=symbol).first()
+            
+            if not stock:
+                logger.info(f"[DIVIDENDS] Stock {symbol} not found in local DB")
+                return {"success": False, "error": f"Stock {symbol} not found in database"}
+            
+            # Get dividend history
+            dividends = session.query(Dividend).filter_by(
+                stock_id=stock.id
+            ).order_by(Dividend.ex_date.desc()).limit(20).all()
+            
             history = []
-            for date, amount in dividends.items():
+            for div in dividends:
                 history.append({
-                    "date": str(date.date()) if hasattr(date, "date") else str(date),
-                    "amount": float(amount)
+                    "date": div.ex_date.isoformat() if div.ex_date else None,
+                    "amount": div.amount,
                 })
-
+            
+            # Get latest dividend yield
+            latest_div = dividends[0] if dividends else None
+            
             data = {
                 "symbol": symbol,
-                "dividendYield": info.get("dividendYield"),
-                "dividendRate": info.get("dividendRate"),
-                "exDividendDate": str(info.get("exDividendDate")) if info.get("exDividendDate") else None,
-                "payoutRatio": info.get("payoutRatio"),
-                "fiveYearAvgDividendYield": info.get("fiveYearAvgDividendYield"),
-                "history": history[-20:],
+                "dividendYield": latest_div.dividend_yield if latest_div else None,
+                "payoutRatio": latest_div.payout_ratio if latest_div else None,
+                "history": history,
+                "source": "local_database",
             }
             return {"success": True, "data": data}
-        except Exception as e:
-            logger.error(f"[YAHOO:DIVIDENDS] Error: {e}")
-            return {"success": False, "error": str(e)}
+        finally:
+            session.close()
 
     @staticmethod
     def get_company_info(symbol: str) -> Dict[str, Any]:

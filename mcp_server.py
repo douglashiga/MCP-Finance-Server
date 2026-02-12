@@ -19,6 +19,13 @@ from services.history_service import HistoryService
 from services.account_service import AccountService
 from services.option_service import OptionService
 from services.yahoo_service import YahooService
+from services.screener_service import ScreenerService
+from services.job_service import JobService
+from services.option_screener_service import OptionScreenerService
+
+# Local DB imports
+from dataloader.database import SessionLocal
+from dataloader.models import Stock, Fundamental, Dividend, HistoricalPrice
 
 # Configure logging
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
@@ -268,6 +275,221 @@ async def yahoo_search(query: str) -> Dict[str, Any]:
 
 
 # ============================================================================
+# Stock Screener Tools
+# ============================================================================
+
+@mcp.tool()
+async def get_stock_screener(market: str = "all", sector: str = None,
+                             sort_by: str = "perf_1d", limit: int = 50) -> Dict[str, Any]:
+    """
+    Stock screener with filters and technical indicators.
+    Returns sorted list of stocks with performance, RSI, MACD, volume, etc.
+
+    Parameters:
+        market: Market filter. Options: 'brazil', 'sweden', 'usa', 'all'
+        sector: Sector filter. Examples: 'Technology', 'Financials', 'Energy'
+        sort_by: Sort column. Options: 'perf_1d', 'perf_1w', 'perf_1m', 'perf_1y', 'rsi', 'volume', 'volatility'
+        limit: Max results (default 50)
+
+    Example: get_stock_screener("brazil", sector="Financials", sort_by="perf_1d")
+    """
+    return ScreenerService.get_stock_screener(market, sector, sort_by, limit)
+
+
+@mcp.tool()
+async def get_top_gainers(market: str = "all", period: str = "1D", limit: int = 10) -> Dict[str, Any]:
+    """
+    Get top performing stocks (biggest gains) by market and period.
+
+    Parameters:
+        market: 'brazil', 'sweden', 'usa', 'all'
+        period: '1D' (day), '1W' (week), '1M' (month)
+        limit: Number of results (default 10)
+
+    Example: get_top_gainers("brazil", "1D") → "Maiores altas do dia no Brasil"
+    """
+    return ScreenerService.get_top_movers(market, period, "top_gainers", limit)
+
+
+@mcp.tool()
+async def get_top_losers(market: str = "all", period: str = "1D", limit: int = 10) -> Dict[str, Any]:
+    """
+    Get worst performing stocks (biggest drops) by market and period.
+
+    Parameters:
+        market: 'brazil', 'sweden', 'usa', 'all'
+        period: '1D' (day), '1W' (week), '1M' (month)
+        limit: Number of results (default 10)
+
+    Example: get_top_losers("sweden", "1W") → "Maiores baixas da semana na Suécia"
+    """
+    return ScreenerService.get_top_movers(market, period, "top_losers", limit)
+
+
+@mcp.tool()
+async def get_top_dividend_payers(market: str = "all", sector: str = None,
+                                  limit: int = 10) -> Dict[str, Any]:
+    """
+    Get stocks with highest dividend yields.
+
+    Parameters:
+        market: 'brazil', 'sweden', 'usa', 'all'
+        sector: Optional sector filter (e.g. 'Financials', 'Energy')
+        limit: Number of results (default 10)
+
+    Example: get_top_dividend_payers("sweden", sector="Financials") → "Top dividendos bancários da Suécia"
+    """
+    return ScreenerService.get_top_dividend_payers(market, sector, limit)
+
+
+@mcp.tool()
+async def get_technical_signals(market: str = "all", signal_type: str = "oversold") -> Dict[str, Any]:
+    """
+    Find stocks with specific technical signals.
+
+    Parameters:
+        market: 'brazil', 'sweden', 'usa', 'all'
+        signal_type: Signal to detect:
+            - 'oversold': RSI < 30 (potential buy)
+            - 'overbought': RSI > 70 (potential sell)
+            - 'golden_cross': EMA20 > SMA200 (bullish)
+            - 'death_cross': EMA20 < SMA200 (bearish)
+            - 'high_volume': Volume 2x above average
+            - 'near_52w_high': Within 5% of 52-week high
+            - 'near_52w_low': Within 5% of 52-week low
+
+    Example: get_technical_signals("brazil", "oversold")
+    """
+    return ScreenerService.get_technical_signals(market, signal_type)
+
+
+# ============================================================================
+# Option Screener Tools
+# ============================================================================
+
+@mcp.tool()
+async def get_option_screener(symbol: str = None, expiry: str = None, 
+                             right: str = None, min_delta: float = None, 
+                             max_delta: float = None, min_iv: float = None,
+                             max_iv: float = None, has_liquidity: bool = True,
+                             limit: int = 50) -> Dict[str, Any]:
+    """
+    Options screener with Greeks (delta, gamma, theta, vega) and IV.
+    Filters by symbol, expiry, delta range, IV range, and liquidity.
+
+    Notes:
+    - Expiries are limited to 5 weeks from now in the background jobs.
+    - 'has_liquidity' filters for options with active bid/ask.
+
+    Parameters:
+        symbol: Underlying symbol (e.g. 'PETR4', 'AAPL')
+        expiry: Specific expiry date (YYYY-MM-DD)
+        right: 'CALL' or 'PUT'
+        min_delta/max_delta: Filter by delta range (e.g. 0.2 to 0.5)
+        min_iv/max_iv: Filter by Implied Volatility range
+        has_liquidity: Filter for options with active quotes
+        limit: Max results (default 50)
+    """
+    return OptionScreenerService.get_option_screener(
+        symbol, expiry, right, min_delta, max_delta, min_iv, max_iv, has_liquidity, limit
+    )
+
+
+@mcp.tool()
+async def get_option_chain_snapshot(symbol: str, expiry: str = None) -> Dict[str, Any]:
+    """
+    Get the latest cached option chain for a symbol and optional expiry.
+    Returns bid, ask, last, delta, and IV for all strikes.
+
+    Parameters:
+        symbol: Underlying symbol
+        expiry: Optional expiry date (YYYY-MM-DD)
+    """
+    return OptionScreenerService.get_option_chain_snapshot(symbol, expiry)
+
+
+# ============================================================================
+# Job Management Tools (LLM can manage data pipeline)
+# ============================================================================
+
+@mcp.tool()
+async def list_jobs() -> Dict[str, Any]:
+    """
+    List all data loader jobs with their schedule, status, and last run info.
+    Use this to understand what data pipelines exist and their health.
+
+    Returns: List of jobs with name, cron schedule, active status, and last run details.
+    """
+    return JobService.list_jobs()
+
+
+@mcp.tool()
+async def get_job_logs(job_name: str, limit: int = 5) -> Dict[str, Any]:
+    """
+    Get recent execution logs for a specific data loader job.
+    Useful for debugging failures or checking data freshness.
+
+    Parameters:
+        job_name: Full or partial job name (e.g. 'Yahoo Prices', 'Stock Metrics')
+        limit: Number of recent runs to return (default 5)
+
+    Example: get_job_logs("Yahoo Prices") → last 5 runs with stdout/stderr
+    """
+    return JobService.get_job_logs(job_name, limit)
+
+
+@mcp.tool()
+async def trigger_job(job_name: str) -> Dict[str, Any]:
+    """
+    Manually trigger a data loader job to run immediately.
+    Use this when data seems stale or you need fresh data.
+
+    Parameters:
+        job_name: Full or partial job name (e.g. 'Calculate Stock Metrics')
+
+    Example: trigger_job("Extract Yahoo Prices") → runs the price extractor now
+    """
+    return JobService.trigger_job(job_name)
+
+
+@mcp.tool()
+async def toggle_job(job_name: str, active: bool) -> Dict[str, Any]:
+    """
+    Enable or disable a scheduled job.
+
+    Parameters:
+        job_name: Full or partial job name
+        active: True to enable, False to disable
+
+    Example: toggle_job("Extract IBKR Prices", false) → disables IBKR extraction
+    """
+    return JobService.toggle_job(job_name, active)
+
+
+@mcp.tool()
+async def get_job_status() -> Dict[str, Any]:
+    """
+    Get health overview of all data pipeline jobs.
+    Shows total, healthy, warning, and error counts plus per-job details.
+
+    Returns: Summary with counts + list of all jobs with last run status.
+    """
+    return JobService.get_job_status()
+
+
+@mcp.tool()
+async def run_pipeline_health_check() -> Dict[str, Any]:
+    """
+    Trigger a lightweight health check across all data loader jobs.
+    Each job script is executed in 'test' mode (limiting symbols) 
+    to verify connectivity, authentication and basic parsing.
+
+    Use this when you want to verify that the whole pipeline is functional.
+    """
+    return JobService.run_pipeline_health_check()
+
+
+# ============================================================================
 # Resources
 # ============================================================================
 
@@ -449,6 +671,96 @@ Use Yahoo Finance format WITH dot suffixes for international stocks:
 ### When unsure:
 Use search_symbol("company name") to find the correct IB ticker.
 """
+
+
+# ============================================================================
+# Local Database Tools (Pre-Cached)
+# ============================================================================
+
+@mcp.tool()
+async def query_local_stocks(country: str = None, sector: str = None) -> Dict[str, Any]:
+    """
+    List stocks available in the local database, optionally filtered.
+
+    Use this to see what data is pre-cached and available for fast querying.
+
+    Parameters:
+        country: Filter by country, e.g. 'Brazil', 'Sweden', 'USA'
+        sector: Filter by sector, e.g. 'Financials', 'Energy'
+
+    Returns: {"success": true, "data": [{"symbol": "PETR4.SA", "name": "Petrobras", "sector": "Energy"}]}
+    """
+    session = SessionLocal()
+    try:
+        query = session.query(Stock)
+        if country:
+            query = query.filter(Stock.country == country)
+        if sector:
+            query = query.filter(Stock.sector == sector)
+        
+        results = query.all()
+        return {
+            "success": True,
+            "data": [
+                {
+                    "symbol": s.symbol,
+                    "name": s.name,
+                    "sector": s.sector,
+                    "country": s.country,
+                    "currency": s.currency
+                }
+                for s in results
+            ]
+        }
+    finally:
+        session.close()
+
+
+@mcp.tool()
+async def query_local_fundamentals(symbol: str) -> Dict[str, Any]:
+    """
+    Get the latest fundamental data from the local database.
+
+    Faster than fetching from Yahoo, but might be slightly outdated (updated daily).
+
+    Parameters:
+        symbol: Ticker symbol, e.g. 'PETR4.SA'
+
+    Returns: {"success": true, "data": {"pe": 4.5, "eps": 2.1, ...}}
+    """
+    session = SessionLocal()
+    try:
+        stock = session.query(Stock).filter(Stock.symbol == symbol).first()
+        if not stock:
+            return {"success": False, "error": f"Stock {symbol} not found in local DB"}
+        
+        # Get latest fundamental record
+        fund = session.query(Fundamental).filter(
+            Fundamental.stock_id == stock.id
+        ).order_by(Fundamental.fetched_at.desc()).first()
+        
+        if not fund:
+            return {"success": False, "error": "No fundamental data available"}
+        
+        return {
+            "success": True,
+            "data": {
+                "symbol": stock.symbol,
+                "fetched_at": fund.fetched_at.isoformat(),
+                "market_cap": fund.market_cap,
+                "pe": fund.trailing_pe,
+                "eps": fund.trailing_eps,
+                "revenue": fund.revenue,
+                "net_margin": fund.net_margin,
+                "roe": fund.roe,
+                "debt_to_equity": fund.debt_to_equity,
+                "dividend_yield": session.query(Dividend).filter(
+                    Dividend.stock_id == stock.id
+                ).order_by(Dividend.ex_date.desc()).first().dividend_yield if stock.dividends else None
+            }
+        }
+    finally:
+        session.close()
 
 
 # ============================================================================

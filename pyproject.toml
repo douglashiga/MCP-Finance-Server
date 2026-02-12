@@ -7,10 +7,16 @@ dependencies = [
     "mcp",
     "ib_insync",
     "pandas",
+    "numpy",
     "yfinance",
     "uvicorn",
     "starlette",
     "sse-starlette",
+    "apscheduler",
+    "fastapi",
+    "sqlalchemy",
+    "psycopg2-binary",
+    "python-multipart",
 ]
 
 [build-system]

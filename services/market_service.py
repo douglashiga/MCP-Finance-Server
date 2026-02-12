@@ -189,43 +189,51 @@ class MarketService:
 
     @staticmethod
     async def get_price(symbol: str, exchange: str = None, currency: str = 'USD') -> Dict[str, Any]:
-        original_input = symbol
-        logger.info(f"[PRICE] Requesting price for {symbol}")
-
-        async with ib_conn.market_semaphore:
-            contract = await MarketService._resolve_contract(symbol, exchange, currency)
-
-            if not contract or contract.conId == 0:
-                logger.info(f"[PRICE] Contract not found on IB, trying Yahoo")
-                yahoo_sym = MarketService._to_yahoo_symbol(symbol, original_input, currency)
-                return MarketService._yahoo_fallback(yahoo_sym, source_note="Contract not found on IB")
-
-            logger.info(f"[PRICE] Contract: conId={contract.conId} {contract.symbol} "
-                       f"exchange={contract.exchange} primary={contract.primaryExchange} "
-                       f"currency={contract.currency}")
-
-            # Fetch market data from IB
-            mkt = await MarketService._fetch_market_data(contract)
-
-            # No data or all null → Yahoo fallback
-            if not mkt or all(v is None for v in mkt.values()):
-                logger.info(f"[PRICE] IB returned no data, falling back to Yahoo Finance")
-                yahoo_sym = MarketService._to_yahoo_symbol(
-                    contract.symbol, original_input, contract.currency
-                )
-                return MarketService._yahoo_fallback(
-                    yahoo_sym,
-                    source_note="IB had no market data (no subscription or market closed)"
-                )
-
-            # IB data is good!
-            return {"success": True, "data": {
-                "symbol": contract.symbol,
-                "exchange": contract.primaryExchange or contract.exchange,
-                "currency": contract.currency,
-                "source": "interactive_brokers",
-                **mkt,
-            }}
+        """
+        Get real-time price from local database (populated by ELT pipeline).
+        Falls back to Yahoo if not found in DB.
+        """
+        from dataloader.database import SessionLocal
+        from dataloader.models import Stock, RealtimePrice
+        
+        logger.info(f"[PRICE] Requesting price for {symbol} from local DB")
+        
+        session = SessionLocal()
+        try:
+            # Query local database
+            stock = session.query(Stock).filter_by(symbol=symbol).first()
+            
+            if not stock:
+                logger.info(f"[PRICE] Stock {symbol} not found in local DB")
+                return {"success": False, "error": f"Stock {symbol} not found in database"}
+            
+            realtime = session.query(RealtimePrice).filter_by(stock_id=stock.id).first()
+            
+            if not realtime:
+                logger.info(f"[PRICE] No realtime price data for {symbol}")
+                return {"success": False, "error": f"No price data available for {symbol}"}
+            
+            return {
+                "success": True,
+                "data": {
+                    "symbol": stock.symbol,
+                    "name": stock.name,
+                    "exchange": stock.exchange,
+                    "currency": realtime.currency or stock.currency,
+                    "price": realtime.price,
+                    "open": realtime.open,
+                    "high": realtime.high,
+                    "low": realtime.low,
+                    "volume": realtime.volume,
+                    "change": realtime.change,
+                    "change_percent": realtime.change_percent,
+                    "market_state": realtime.market_state,
+                    "last_updated": realtime.last_updated.isoformat() if realtime.last_updated else None,
+                    "source": "local_database",
+                }
+            }
+        finally:
+            session.close()
 
     @staticmethod
     def _yahoo_fallback(yahoo_symbol: str, source_note: str = "") -> Dict[str, Any]:

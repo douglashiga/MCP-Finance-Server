@@ -1,0 +1,136 @@
+"""
+Option Screener Service — Queries option_metrics table
+for filtering by Greeks, IV, bid/ask, and expiries.
+"""
+import logging
+from datetime import date, datetime
+from sqlalchemy import and_, desc, asc
+from dataloader.database import SessionLocal
+from dataloader.models import Stock, OptionMetric
+
+logger = logging.getLogger(__name__)
+
+class OptionScreenerService:
+
+    @staticmethod
+    def get_option_screener(symbol: str = None, expiry: str = None, 
+                           right: str = None, min_delta: float = None, 
+                           max_delta: float = None, min_iv: float = None,
+                           max_iv: float = None, has_liquidity: bool = True,
+                           limit: int = 50):
+        """
+        Filter and screen options based on greeks and liquidity.
+        """
+        session = SessionLocal()
+        try:
+            query = session.query(OptionMetric, Stock).join(
+                Stock, Stock.id == OptionMetric.stock_id
+            )
+
+            if symbol:
+                query = query.filter(Stock.symbol.ilike(f"%{symbol}%"))
+            
+            if expiry:
+                expiry_date = datetime.strptime(expiry, '%Y-%m-%d').date()
+                query = query.filter(OptionMetric.expiry == expiry_date)
+            
+            if right:
+                query = query.filter(OptionMetric.right == right.upper())
+            
+            if min_delta is not None:
+                query = query.filter(OptionMetric.delta >= min_delta)
+            if max_delta is not None:
+                query = query.filter(OptionMetric.delta <= max_delta)
+                
+            if min_iv is not None:
+                query = query.filter(OptionMetric.iv >= min_iv)
+            if max_iv is not None:
+                query = query.filter(OptionMetric.iv <= max_iv)
+
+            if has_liquidity:
+                # Presence of bid and ask
+                query = query.filter(
+                    OptionMetric.bid.isnot(None),
+                    OptionMetric.ask.isnot(None),
+                    OptionMetric.bid > 0
+                )
+
+            # Order by liquidity or distance to strike? 
+            # Let's order by latest update or delta as default
+            query = query.order_by(OptionMetric.expiry.asc(), OptionMetric.strike.asc()).limit(limit)
+
+            results = query.all()
+
+            data = []
+            for metric, stock in results:
+                data.append({
+                    "symbol": stock.symbol,
+                    "option_symbol": metric.option_symbol,
+                    "strike": metric.strike,
+                    "right": metric.right,
+                    "expiry": str(metric.expiry),
+                    "bid": metric.bid,
+                    "ask": metric.ask,
+                    "last": metric.last,
+                    "volume": metric.volume,
+                    "open_interest": metric.open_interest,
+                    "delta": metric.delta,
+                    "gamma": metric.gamma,
+                    "theta": metric.theta,
+                    "vega": metric.vega,
+                    "iv": metric.iv,
+                    "updated_at": str(metric.updated_at)
+                })
+
+            return {"success": True, "data": data, "count": len(data)}
+
+        except Exception as e:
+            logger.error(f"Option Screener error: {e}")
+            return {"success": False, "error": str(e)}
+        finally:
+            session.close()
+
+    @staticmethod
+    def get_option_chain_snapshot(symbol: str, expiry: str = None):
+        """
+        Get the full cached option chain for a symbol and optional expiry.
+        """
+        session = SessionLocal()
+        try:
+            stock = session.query(Stock).filter(Stock.symbol.ilike(f"%{symbol}%")).first()
+            if not stock:
+                return {"success": False, "error": f"Stock {symbol} not found"}
+            
+            query = session.query(OptionMetric).filter(OptionMetric.stock_id == stock.id)
+            
+            if expiry:
+                expiry_date = datetime.strptime(expiry, '%Y-%m-%d').date()
+                query = query.filter(OptionMetric.expiry == expiry_date)
+            
+            results = query.order_by(OptionMetric.expiry.asc(), OptionMetric.strike.asc()).all()
+            
+            data = []
+            for metric in results:
+                data.append({
+                    "option_symbol": metric.option_symbol,
+                    "strike": metric.strike,
+                    "right": metric.right,
+                    "expiry": str(metric.expiry),
+                    "bid": metric.bid,
+                    "ask": metric.ask,
+                    "delta": metric.delta,
+                    "iv": metric.iv
+                })
+            
+            return {
+                "success": True, 
+                "symbol": stock.symbol,
+                "data": data, 
+                "count": len(data)
+            }
+            
+        except Exception as e:
+            logger.error(f"Option chain snapshot error: {e}")
+            return {"success": False, "error": str(e)}
+        finally:
+            session.close()

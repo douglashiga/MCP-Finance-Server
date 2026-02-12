@@ -1,6 +1,28 @@
 services:
 
   # ============================================================
+  # PostgreSQL — Shared database for all services
+  # ============================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: finance-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: finance_db
+      POSTGRES_USER: finance
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-finance_secret}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U finance -d finance_db" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ============================================================
   # IB Gateway (headless) — runs the Interactive Brokers Gateway
   # ============================================================
   ib-gateway:
@@ -15,27 +37,31 @@ services:
       READ_ONLY_API: "yes"
       VNC_SERVER_PASSWORD: password
     ports:
-      - "4001:4003"   # API port (4003 inside -> 4001 host)
-      - "5901:5900"   # VNC for debugging
+      - "4001:4003" # API port (4003 inside -> 4001 host)
+      - "5901:5900" # VNC for debugging
     volumes:
       - ib-gateway-settings:/home/ibgateway/Jts
     healthcheck:
-      test: ["CMD", "nc", "-z", "127.0.0.1", "4003"]
+      test: [ "CMD", "nc", "-z", "127.0.0.1", "4003" ]
       interval: 30s
       timeout: 5s
       retries: 5
       start_period: 30s
 
   # ============================================================
-  # MCP Finance Server — connects to IB Gateway container
+  # MCP Finance Server — 22 tools for LLM agents
   # ============================================================
   mcp-finance:
     build: .
     container_name: mcp-finance
     restart: unless-stopped
     depends_on:
-      - ib-gateway
+      postgres:
+        condition: service_healthy
+      ib-gateway:
+        condition: service_started
     environment:
+      - DATABASE_URL=postgresql://finance:${POSTGRES_PASSWORD:-finance_secret}@postgres:5432/finance_db
       - IB_HOST=ib-gateway
       - IB_PORT=4003
       - IB_CLIENT_ID=1
@@ -48,5 +74,40 @@ services:
     volumes:
       - ./logs:/app/logs
 
+  # ============================================================
+  # Data Loader — Scheduler + API + Web UI (port 8001)
+  # ============================================================
+  dataloader:
+    build: .
+    container_name: dataloader
+    command: python -m dataloader.app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://finance:${POSTGRES_PASSWORD:-finance_secret}@postgres:5432/finance_db
+      - LOG_LEVEL=INFO
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./logs:/app/logs
+
+  # ============================================================
+  # Seed — One-shot init (run manually: docker compose run seed)
+  # ============================================================
+  seed:
+    build: .
+    container_name: finance-seed
+    command: python -m dataloader.seed
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://finance:${POSTGRES_PASSWORD:-finance_secret}@postgres:5432/finance_db
+    profiles:
+      - init # Only runs with: docker compose --profile init run seed
+
 volumes:
+  postgres-data:
   ib-gateway-settings:
