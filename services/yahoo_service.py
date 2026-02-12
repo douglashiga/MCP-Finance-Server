@@ -20,6 +20,40 @@ class YahooService:
     """
 
     @staticmethod
+    def get_price(symbol: str) -> Dict[str, Any]:
+        """Get current price data from Yahoo Finance (free, no subscription needed)."""
+        logger.info(f"[YAHOO:PRICE] {symbol}")
+        try:
+            yf = _get_yf()
+            ticker = yf.Ticker(symbol)
+            info = ticker.info
+
+            price = info.get("currentPrice") or info.get("regularMarketPrice")
+            prev_close = info.get("regularMarketPreviousClose") or info.get("previousClose")
+
+            data = {
+                "symbol": symbol,
+                "shortName": info.get("shortName"),
+                "price": float(price) if price else None,
+                "previousClose": float(prev_close) if prev_close else None,
+                "open": float(info["regularMarketOpen"]) if info.get("regularMarketOpen") else None,
+                "dayHigh": float(info["dayHigh"]) if info.get("dayHigh") else None,
+                "dayLow": float(info["dayLow"]) if info.get("dayLow") else None,
+                "volume": int(info["volume"]) if info.get("volume") else None,
+                "bid": float(info["bid"]) if info.get("bid") else None,
+                "ask": float(info["ask"]) if info.get("ask") else None,
+                "marketCap": info.get("marketCap"),
+                "exchange": info.get("exchange"),
+                "currency": info.get("currency"),
+                "marketState": info.get("marketState"),
+                "source": "yahoo_finance",
+            }
+            return {"success": True, "data": data}
+        except Exception as e:
+            logger.error(f"[YAHOO:PRICE] Error: {e}")
+            return {"success": False, "error": str(e)}
+
+    @staticmethod
     def get_fundamentals(symbol: str) -> Dict[str, Any]:
         """Get fundamental data: PE, EPS, Market Cap, Revenue, etc."""
         logger.info(f"[YAHOO:FUNDAMENTALS] {symbol}")

@@ -155,24 +155,55 @@ class MarketService:
         }
 
     @staticmethod
+    def _to_yahoo_symbol(symbol: str, original_input: str, currency: str) -> str:
+        """
+        Convert IB symbol back to Yahoo format for fallback.
+        If original input had suffix (e.g. PETR4.SA), use it.
+        Otherwise, reverse-lookup from exchange_map by currency.
+        US stocks stay as-is.
+        """
+        # If original already had Yahoo suffix, use it
+        if '.' in original_input:
+            return original_input
+
+        # Reverse lookup: find suffix by currency
+        CURRENCY_TO_SUFFIX = {
+            "BRL": ".SA", "SEK": ".ST", "GBP": ".L", "EUR": ".DE",
+            "CAD": ".TO", "HKD": ".HK", "JPY": ".T", "AUD": ".AX",
+            "NOK": ".OL", "DKK": ".CO", "CHF": ".SW", "SGD": ".SI",
+            "KRW": ".KS", "TWD": ".TW", "INR": ".NS", "MXN": ".MX",
+            "ZAR": ".JO", "TRY": ".IS", "ARS": ".BA",
+        }
+
+        suffix = CURRENCY_TO_SUFFIX.get(currency, "")
+        if suffix and currency != "USD":
+            return symbol + suffix
+        return symbol
+
+    @staticmethod
     async def get_price(symbol: str, exchange: str = None, currency: str = 'USD') -> Dict[str, Any]:
+        original_input = symbol  # Keep original for Yahoo fallback
         logger.info(f"[PRICE] Requesting price for {symbol}")
 
         async with ib_conn.market_semaphore:
             contract = await MarketService._resolve_contract(symbol, exchange, currency)
 
             if not contract or contract.conId == 0:
-                return {"success": False, "error": f"Contract not found: {symbol}. Try search_symbol('{symbol}') to find the correct ticker."}
+                # IB can't find it — go straight to Yahoo
+                logger.info(f"[PRICE] Contract not found on IB, trying Yahoo")
+                yahoo_sym = MarketService._to_yahoo_symbol(symbol, original_input, currency)
+                return MarketService._yahoo_fallback(yahoo_sym, source_note="Contract not found on IB")
 
             logger.info(f"[PRICE] Using contract: {contract.symbol} exchange={contract.exchange} primary={contract.primaryExchange} currency={contract.currency}")
 
-            # Fetch market data
+            # Fetch market data from IB
             mkt = await MarketService._fetch_market_data(contract)
 
             if not mkt:
-                return {"success": False, "error": f"No market data for {symbol}"}
+                yahoo_sym = MarketService._to_yahoo_symbol(contract.symbol, original_input, contract.currency)
+                return MarketService._yahoo_fallback(yahoo_sym, source_note="IB returned no data")
 
-            # If all values null and we used SMART, retry with primaryExchange
+            # If all values null, retry with primaryExchange
             all_null = all(v is None for v in mkt.values())
             if all_null and contract.primaryExchange and contract.exchange == "SMART":
                 logger.info(f"[PRICE] All null with SMART, retrying with primaryExchange={contract.primaryExchange}")
@@ -187,18 +218,31 @@ class MarketService:
                 except Exception:
                     pass
 
+            # Still all null after retry? → Yahoo fallback
+            if all(v is None for v in mkt.values()):
+                logger.info(f"[PRICE] IB returned all null, falling back to Yahoo Finance")
+                yahoo_sym = MarketService._to_yahoo_symbol(contract.symbol, original_input, contract.currency)
+                return MarketService._yahoo_fallback(yahoo_sym, source_note="IB had no market data (subscription/hours)")
+
+            # IB data is good!
             data = {
                 "symbol": contract.symbol,
                 "exchange": contract.primaryExchange or contract.exchange,
                 "currency": contract.currency,
+                "source": "interactive_brokers",
                 **mkt,
             }
-
-            # Note if all still null
-            if all(v is None for k, v in mkt.items()):
-                data["note"] = "Market may be closed or no market data subscription for this exchange. Try during market hours."
-
             return {"success": True, "data": data}
+
+    @staticmethod
+    def _yahoo_fallback(yahoo_symbol: str, source_note: str = "") -> Dict[str, Any]:
+        """Fetch price from Yahoo Finance as fallback."""
+        from services.yahoo_service import YahooService
+        logger.info(f"[YAHOO_FALLBACK] Fetching {yahoo_symbol} ({source_note})")
+        result = YahooService.get_price(yahoo_symbol)
+        if result.get("success") and result.get("data"):
+            result["data"]["fallback_reason"] = source_note
+        return result
 
     @staticmethod
     async def search_symbol(query: str) -> Dict[str, Any]:
