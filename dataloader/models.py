@@ -102,6 +102,49 @@ class Dividend(Base):
     )
 
 
+class HistoricalEarnings(Base):
+    """Historical earnings data (EPS actual vs estimate)."""
+    __tablename__ = "historical_earnings"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    stock_id = Column(Integer, ForeignKey("stocks.id", ondelete="CASCADE"), nullable=False)
+    date = Column(Date, nullable=False)
+    period_ending = Column(Date)
+    eps_estimate = Column(Float)
+    eps_actual = Column(Float)
+    surprise_percent = Column(Float)
+    
+    stock = relationship("Stock", backref="earnings_history")
+
+    __table_args__ = (
+        UniqueConstraint("stock_id", "date", name="uq_earnings_date"),
+        Index("ix_earnings_stock_date", "stock_id", "date"),
+    )
+
+
+class EarningsCalendar(Base):
+    """Upcoming earnings events."""
+    __tablename__ = "earnings_calendar"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    stock_id = Column(Integer, ForeignKey("stocks.id", ondelete="CASCADE"), nullable=False, unique=True)
+    earnings_date = Column(Date, nullable=False)
+    earnings_average = Column(Float)
+    earnings_low = Column(Float)
+    earnings_high = Column(Float)
+    revenue_average = Column(Float)
+    revenue_low = Column(Float)
+    revenue_high = Column(Float)
+    
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    stock = relationship("Stock")
+
+    __table_args__ = (
+        Index("ix_earnings_calendar_date", "earnings_date"),
+    )
+
+
 class HistoricalPrice(Base):
     """Daily OHLCV price data."""
     __tablename__ = "historical_prices"

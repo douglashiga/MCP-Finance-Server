@@ -100,9 +100,16 @@ DEFAULT_JOBS = [
     },
     {
         "name": "Dividends Loader",
-        "description": "Fetches 5-year dividend history and current yield for all stocks",
-        "script_path": "load_dividends.py",
+        "description": "Fetches 1-year dividend history and current yield (Monthly update)",
+        "script_path": "load_dividends.py --years 1",
         "cron_expression": "0 7 * * 1",  # Weekly on Monday at 7 AM
+        "timeout_seconds": 600,
+    },
+    {
+        "name": "Earnings Loader",
+        "description": "Fetches 1-year earnings history and upcoming calendar (Incremental update)",
+        "script_path": "load_earnings.py --years 1",
+        "cron_expression": "0 8 * * 1-5",  # Weekdays at 8 AM
         "timeout_seconds": 600,
     },
     {
@@ -190,8 +197,16 @@ def main():
         extract_prices()
         transform_prices()
         
-        print("  → Fetching historical data (5-year initial load)...")
+        print("  → Fetching historical pricing (5-year initial load)...")
         load_historical(period="5y")
+        
+        print("  → Fetching dividends (5-year initial load)...")
+        from dataloader.scripts.load_dividends import main as load_divs
+        load_divs(years=5)
+        
+        print("  → Fetching earnings & calendar (10-year initial load)...")
+        from dataloader.scripts.load_earnings import main as load_earnings
+        load_earnings(years=10)
         
         print("  → Calculating technical metrics & movers...")
         calculate_metrics()

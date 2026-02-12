@@ -5,15 +5,18 @@ Uses yfinance.
 """
 import sys
 import os
+import argparse
+import sys
+import os
 import time
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from datetime import datetime
 from dataloader.database import SessionLocal, init_db
 from dataloader.models import Stock, Dividend
 
-
-def fetch_dividends(symbol: str) -> list[dict]:
+def fetch_dividends(symbol: str, years: int = 5) -> list[dict]:
     """Fetch dividend history for a stock."""
     import yfinance as yf
     
@@ -23,14 +26,14 @@ def fetch_dividends(symbol: str) -> list[dict]:
     current_yield = info.get("dividendYield")
     payout_ratio = info.get("payoutRatio")
     
-    # Get dividend history (last 5 years)
+    # Get dividend history
     divs = ticker.dividends
     if divs is None or divs.empty:
         return []
     
-    # Filter last 5 years
+    # Filter by years
     from datetime import timedelta
-    cutoff = datetime.now() - timedelta(days=5*365)
+    cutoff = datetime.now() - timedelta(days=years*365)
     divs = divs[divs.index >= cutoff.strftime("%Y-%m-%d")]
     
     results = []
@@ -46,7 +49,13 @@ def fetch_dividends(symbol: str) -> list[dict]:
     return results
 
 
-def main():
+def main(years=None):
+    if years is None:
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--years", type=int, default=5, help="Number of years of history to fetch")
+        args, _ = parser.parse_known_args()
+        years = args.years
+    
     init_db()
     session = SessionLocal()
     count = 0
@@ -55,12 +64,12 @@ def main():
     try:
         stocks = session.query(Stock).all()
         total = len(stocks)
-        print(f"[DIVIDENDS] Fetching data for {total} stocks...")
+        print(f"[DIVIDENDS] Fetching {years}-year history for {total} stocks...")
 
         for i, stock in enumerate(stocks, 1):
             try:
                 print(f"  [{i}/{total}] {stock.symbol}...", end=" ", flush=True)
-                divs = fetch_dividends(stock.symbol)
+                divs = fetch_dividends(stock.symbol, years=years)
                 
                 if divs:
                     for d in divs:

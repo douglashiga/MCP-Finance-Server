@@ -25,7 +25,10 @@ from services.option_screener_service import OptionScreenerService
 
 # Local DB imports
 from dataloader.database import SessionLocal
-from dataloader.models import Stock, Fundamental, Dividend, HistoricalPrice
+from dataloader.models import (
+    Stock, Fundamental, Dividend, HistoricalPrice, 
+    HistoricalEarnings, EarningsCalendar
+)
 
 # Configure logging
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
@@ -676,6 +679,83 @@ Use search_symbol("company name") to find the correct IB ticker.
 # ============================================================================
 # Local Database Tools (Pre-Cached)
 # ============================================================================
+
+@mcp.tool()
+async def get_earnings_history(symbol: str, limit: int = 10) -> Dict[str, Any]:
+    """
+    Get historical earnings data (EPS surprises) for a stock from the local database.
+    Generally covers the last 10 years if available.
+
+    Parameters:
+        symbol: Ticker symbol (Yahoo format), e.g. 'AAPL', 'PETR4.SA'
+        limit: Number of recent quarters to return
+
+    Returns: {"success": true, "data": [{"date": "2023-11-01", "eps_estimate": 1.2, "eps_actual": 1.4, "surprise_percent": 16.6}, ...]}
+    """
+    session = SessionLocal()
+    try:
+        stock = session.query(Stock).filter(Stock.symbol == symbol).first()
+        if not stock:
+            return {"success": False, "error": f"Stock {symbol} not found"}
+        
+        results = session.query(HistoricalEarnings).filter(
+            HistoricalEarnings.stock_id == stock.id
+        ).order_by(HistoricalEarnings.date.desc()).limit(limit).all()
+        
+        return {
+            "success": True,
+            "data": [
+                {
+                    "date": h.date.isoformat(),
+                    "period_ending": h.period_ending.isoformat() if h.period_ending else None,
+                    "eps_estimate": h.eps_estimate,
+                    "eps_actual": h.eps_actual,
+                    "surprise_percent": h.surprise_percent
+                }
+                for h in results
+            ]
+        }
+    finally:
+        session.close()
+
+
+@mcp.tool()
+async def get_earnings_calendar(symbol: str) -> Dict[str, Any]:
+    """
+    Get upcoming earnings date and analyst expectations for a stock.
+
+    Parameters:
+        symbol: Ticker symbol (Yahoo format), e.g. 'AAPL', 'PETR4.SA'
+
+    Returns: {"success": true, "data": {"earnings_date": "2024-05-01", "eps_average": 1.5, ...}}
+    """
+    session = SessionLocal()
+    try:
+        stock = session.query(Stock).filter(Stock.symbol == symbol).first()
+        if not stock:
+            return {"success": False, "error": f"Stock {symbol} not found"}
+        
+        cal = session.query(EarningsCalendar).filter(EarningsCalendar.stock_id == stock.id).first()
+        if not cal:
+            return {"success": False, "error": "No upcoming earnings calendar data found"}
+        
+        return {
+            "success": True,
+            "data": {
+                "symbol": symbol,
+                "earnings_date": cal.earnings_date.isoformat(),
+                "earnings_average": cal.earnings_average,
+                "earnings_low": cal.earnings_low,
+                "earnings_high": cal.earnings_high,
+                "revenue_average": cal.revenue_average,
+                "revenue_low": cal.revenue_low,
+                "revenue_high": cal.revenue_high,
+                "updated_at": cal.updated_at.isoformat()
+            }
+        }
+    finally:
+        session.close()
+
 
 @mcp.tool()
 async def query_local_stocks(country: str = None, sector: str = None) -> Dict[str, Any]:
