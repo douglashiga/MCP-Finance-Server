@@ -45,22 +45,21 @@ async def get_stock_price(symbol: str, exchange: str = None, currency: str = 'US
     """
     Get real-time market price for a stock from Interactive Brokers.
 
-    Use this tool when you need the CURRENT, LIVE price of a stock.
-    Accepts Yahoo Finance format (e.g. 'VOLV-B.ST', 'PETR4.SA') — auto-converts to IB format.
+    IMPORTANT: Use IB ticker format (no dots or suffixes).
     For fundamentals (PE, EPS) use get_fundamentals instead.
 
     Parameters:
-        symbol: Stock ticker. Accepts multiple formats:
-            - US stocks: 'AAPL', 'MSFT', 'TSLA'
-            - Brazilian: 'PETR4' or 'PETR4.SA'
-            - Swedish: 'VOLVB' or 'VOLV-B.ST'
-            - European: 'BMW.DE', 'MC.PA', 'ISP.MI'
-        exchange: Optional. Auto-detected from suffix if not provided.
-        currency: Optional. Auto-detected from suffix if not provided.
+        symbol: IB ticker (NO suffixes like .SA .ST .DE). Examples:
+            - US: 'AAPL', 'MSFT', 'TSLA', 'AMZN'
+            - Brazil: 'PETR4', 'VALE3', 'ITUB4'
+            - Sweden: 'VOLVB', 'ERICB'
+            - Germany: 'BMW', 'SAP'
+        exchange: IB exchange code. Examples: 'SMART' (US default), 'BOVESPA' (Brazil), 'SFB' (Stockholm), 'IBIS' (Germany/Xetra), 'LSE' (London)
+        currency: 'USD', 'BRL', 'SEK', 'EUR', 'GBP'
 
     Returns: {"success": true, "data": {"symbol": "AAPL", "exchange": "SMART", "currency": "USD", "price": 150.25, "close": 149.0}}
 
-    Example: get_stock_price("AAPL") or get_stock_price("VOLV-B.ST")
+    Example: get_stock_price("AAPL") or get_stock_price("PETR4", "BOVESPA", "BRL")
     """
     return await MarketService.get_price(symbol, exchange, currency)
 
@@ -75,7 +74,7 @@ async def get_historical_data(symbol: str, duration: str = "1 D", bar_size: str 
     Results are cached for 30 seconds to reduce API load.
 
     Parameters:
-        symbol: Stock ticker, e.g. 'AAPL'
+        symbol: IB ticker (no suffixes), e.g. 'AAPL', 'PETR4', 'VOLVB'
         duration: How far back. Options: '1 D', '1 W', '1 M', '3 M', '1 Y'
         bar_size: Bar granularity. Options: '1 min', '5 mins', '15 mins', '1 hour', '1 day'
 
@@ -97,7 +96,7 @@ async def search_symbol(query: str) -> Dict[str, Any]:
     use yahoo_search instead.
 
     Parameters:
-        query: Ticker symbol or partial name, e.g. 'AAPL' or 'Apple'
+        query: Ticker symbol or company name, e.g. 'AAPL', 'PETR4', 'Volvo', 'Apple'
 
     Returns: {"success": true, "data": [{"symbol": "AAPL", "secType": "STK", "exchange": "NASDAQ", "conId": 265598}]}
 
@@ -131,7 +130,7 @@ async def get_option_chain(symbol: str) -> Dict[str, Any]:
     Use this FIRST to discover available options before calling get_option_greeks.
 
     Parameters:
-        symbol: Underlying stock ticker, e.g. 'AAPL'
+        symbol: Underlying IB ticker (no suffixes), e.g. 'AAPL', 'PETR4'
 
     Returns: {"success": true, "data": {"underlying": "AAPL", "multiplier": "100", "expirations": ["20240119", "20240216"], "strikes": [140.0, 145.0, 150.0]}}
 
@@ -149,7 +148,7 @@ async def get_option_greeks(symbol: str, last_trade_date: str, strike: float, ri
     Call get_option_chain first to find valid expirations and strikes.
 
     Parameters:
-        symbol: Underlying ticker, e.g. 'AAPL'
+        symbol: Underlying IB ticker (no suffixes), e.g. 'AAPL'
         last_trade_date: Expiration in format 'YYYYMMDD', e.g. '20240119'
         strike: Strike price, e.g. 150.0
         right: 'C' for Call, 'P' for Put
@@ -173,7 +172,7 @@ async def get_fundamentals(symbol: str) -> Dict[str, Any]:
     Use this for valuation analysis. Does NOT require IB connection.
 
     Parameters:
-        symbol: Stock ticker, e.g. 'AAPL', 'MSFT'
+        symbol: Yahoo Finance ticker. For international stocks use suffix: 'AAPL' (US), 'PETR4.SA' (Brazil), 'VOLV-B.ST' (Sweden), 'BMW.DE' (Germany)
 
     Returns: {"success": true, "data": {"symbol": "AAPL", "marketCap": 3000000000000, "trailingPE": 28.5, "trailingEps": 6.42, "revenue": 383000000000, ...}}
 
@@ -190,7 +189,7 @@ async def get_dividends(symbol: str) -> Dict[str, Any]:
     Use this to analyze income potential of a stock.
 
     Parameters:
-        symbol: Stock ticker, e.g. 'AAPL', 'KO', 'JNJ'
+        symbol: Yahoo Finance ticker. Use suffix for international: 'AAPL', 'PETR4.SA', 'VOLV-B.ST'
 
     Returns: {"success": true, "data": {"dividendYield": 0.005, "dividendRate": 0.96, "payoutRatio": 0.15, "history": [{"date": "2024-01-10", "amount": 0.24}]}}
 
@@ -207,7 +206,7 @@ async def get_company_info(symbol: str) -> Dict[str, Any]:
     Use this to understand what a company does before analyzing its stock.
 
     Parameters:
-        symbol: Stock ticker, e.g. 'AAPL'
+        symbol: Yahoo Finance ticker. Use suffix for international: 'AAPL', 'PETR4.SA', 'VOLV-B.ST'
 
     Returns: {"success": true, "data": {"shortName": "Apple Inc.", "sector": "Technology", "industry": "Consumer Electronics", "longBusinessSummary": "...", ...}}
 
@@ -224,7 +223,7 @@ async def get_financial_statements(symbol: str) -> Dict[str, Any]:
     Use this for deep financial analysis and comparing across periods.
 
     Parameters:
-        symbol: Stock ticker, e.g. 'AAPL'
+        symbol: Yahoo Finance ticker. Use suffix for international: 'AAPL', 'PETR4.SA'
 
     Returns: {"success": true, "data": {"income_statement": [...], "balance_sheet": [...], "cash_flow": [...]}}
 
@@ -241,7 +240,7 @@ async def get_exchange_info(symbol: str) -> Dict[str, Any]:
     Use this to check if a market is open, what timezone it operates in, etc.
 
     Parameters:
-        symbol: Any ticker on the exchange, e.g. 'AAPL' for NASDAQ, 'VOW3.DE' for Frankfurt
+        symbol: Yahoo Finance ticker, e.g. 'AAPL' for NASDAQ, 'VOW3.DE' for Frankfurt
 
     Returns: {"success": true, "data": {"exchange": "NMS", "exchangeTimezoneName": "America/New_York", "marketState": "REGULAR"}}
 
@@ -304,6 +303,83 @@ async def resource_market_ticker(symbol: str) -> Dict[str, Any]:
 # ============================================================================
 
 @mcp.prompt()
+def ibkr_guide() -> str:
+    """Essential guide about Interactive Brokers API. READ THIS FIRST before using any IB tools."""
+    return """## Interactive Brokers (IBKR) — Guide for LLM
+
+### 1. Ticker Format (CRITICAL)
+IB uses its OWN ticker format. NEVER send Yahoo/Bloomberg suffixes (.SA, .ST, .DE, .L, etc.) to IB tools.
+
+| What the user says | IB Ticker | Exchange | Currency |
+|---------------------|-----------|----------|----------|
+| Petrobras / PETR4 | PETR4 | BOVESPA | BRL |
+| Volvo B / VOLV-B | VOLVB | SFB | SEK |
+| BMW | BMW | IBIS | EUR |
+| Apple / AAPL | AAPL | SMART | USD |
+| Shell / SHEL | SHEL | LSE | GBP |
+| LVMH / MC | MC | SBF | EUR |
+| Toyota / 7203 | 7203 | TSE | JPY |
+
+Rules:
+- Remove dots and everything after them (PETR4.SA → PETR4)
+- Remove dashes (VOLV-B → VOLVB)
+- Always pass exchange and currency for non-US stocks
+
+### 2. Exchange Codes
+| Country | IB Exchange | Currency |
+|---------|------------|----------|
+| US | SMART | USD |
+| Brazil | BOVESPA | BRL |
+| Sweden | SFB | SEK |
+| Germany | IBIS | EUR |
+| UK | LSE | GBP |
+| France | SBF | EUR |
+| Japan | TSE | JPY |
+| Hong Kong | SEHK | HKD |
+| Australia | ASX | AUD |
+| Canada | TSE | CAD |
+| Italy | BVME | EUR |
+| Netherlands | AEB | EUR |
+| Norway | OSE | NOK |
+| Denmark | CSE | DKK |
+
+### 3. Market Hours (UTC)
+- US (NYSE/NASDAQ): 14:30–21:00
+- Brazil (BOVESPA): 14:00–21:00
+- Europe (LSE/IBIS/SFB): 08:00–16:30
+- Japan (TSE): 00:00–06:00
+- Hong Kong (SEHK): 01:30–08:00
+Outside these hours, bid/ask/price may be null. The 'close' field shows the last trading day's close.
+
+### 4. Data Limitations
+- Prices require market data subscription per exchange (paid separately in IB account)
+- If price/bid/ask/close are all null → User likely has no market data subscription for that exchange
+- Delayed data (15 min) may be available depending on subscription
+
+### 5. Read-Only Mode
+This server runs in READ-ONLY mode. You CANNOT place orders, modify positions, or execute trades.
+Available actions: view prices, historical data, account summary, portfolio positions, options data.
+
+### 6. Recommended Workflow
+1. If user asks about a stock, first determine the IB ticker + exchange
+2. Use search_symbol("company name") if unsure about the IB ticker
+3. For price: get_stock_price("TICKER", "EXCHANGE", "CURRENCY")
+4. For fundamentals/info: use Yahoo tools with Yahoo format (PETR4.SA, VOLV-B.ST)
+5. Combine data from both sources for complete analysis
+
+### 7. Yahoo vs IB — When to use which
+| Need | Tool | Format |
+|------|------|--------|
+| Live price, bid/ask | get_stock_price (IB) | PETR4 |
+| PE, EPS, margins | get_fundamentals (Yahoo) | PETR4.SA |
+| Company profile | get_company_info (Yahoo) | PETR4.SA |
+| Dividends | get_dividends (Yahoo) | PETR4.SA |
+| Historical bars | get_historical_data (IB) | PETR4 |
+| Options | get_option_chain (IB) | PETR4 |
+| Account/Portfolio | get_account_summary (IB) | — |
+"""
+
+@mcp.prompt()
 def analyze_ticker(symbol: str) -> str:
     """Comprehensive stock analysis prompt. Combines real-time IB data with Yahoo fundamentals."""
     return f"""Please perform a comprehensive analysis of {symbol}:
@@ -342,28 +418,36 @@ Analyze:
 
 @mcp.prompt()
 def ticker_format_guide() -> str:
-    """Guide on how to format stock tickers for different markets. Use this when unsure about the correct ticker format."""
-    return """## Stock Ticker Format Guide
+    """Guide on how to format stock tickers. IMPORTANT: IB tools and Yahoo tools use DIFFERENT formats."""
+    return """## Ticker Format Guide
 
-This server auto-converts Yahoo Finance format to Interactive Brokers format.
-You can use either format when calling tools like get_stock_price().
+IMPORTANT: IB tools and Yahoo tools use DIFFERENT ticker formats!
 
-| Market | Yahoo Format | IB Format | Example |
-|--------|-------------|-----------|----------|
-| US | AAPL | AAPL | get_stock_price("AAPL") |
-| Brazil | PETR4.SA | PETR4/BOVESPA | get_stock_price("PETR4.SA") or get_stock_price("PETR4") |
-| Sweden | VOLV-B.ST | VOLVB/SFB | get_stock_price("VOLV-B.ST") |
-| Germany | BMW.DE | BMW/IBIS | get_stock_price("BMW.DE") |
-| UK | SHEL.L | SHEL/LSE | get_stock_price("SHEL.L") |
-| France | MC.PA | MC/SBF | get_stock_price("MC.PA") |
-| Japan | 7203.T | 7203/TSE | get_stock_price("7203.T") |
-| Hong Kong | 0700.HK | 0700/SEHK | get_stock_price("0700.HK") |
+### IB Tools (get_stock_price, search_symbol, get_historical_data, get_option_chain, get_option_greeks)
+Use clean IB tickers WITHOUT dots or suffixes:
+| Market | Ticker | Exchange | Currency |
+|--------|--------|----------|----------|
+| US | AAPL | SMART | USD |
+| Brazil | PETR4 | BOVESPA | BRL |
+| Sweden | VOLVB | SFB | SEK |
+| Germany | BMW | IBIS | EUR |
+| UK | SHEL | LSE | GBP |
+| France | MC | SBF | EUR |
 
-### Tips:
-- **US stocks**: Just use the ticker (AAPL, TSLA, AMZN)
-- **International**: Use Yahoo format with suffix (.SA, .ST, .DE, etc.)
-- **If a ticker fails**: Use search_symbol("company name") to find the correct format
-- **Yahoo Finance tools** (get_fundamentals, get_company_info): Always use Yahoo format (PETR4.SA, VOLV-B.ST)
+Examples:
+- get_stock_price("AAPL")
+- get_stock_price("PETR4", "BOVESPA", "BRL")
+- get_stock_price("VOLVB", "SFB", "SEK")
+
+### Yahoo Tools (get_fundamentals, get_dividends, get_company_info, get_financial_statements)
+Use Yahoo Finance format WITH dot suffixes for international stocks:
+- get_fundamentals("AAPL")          # US (no suffix)
+- get_fundamentals("PETR4.SA")      # Brazil
+- get_fundamentals("VOLV-B.ST")     # Sweden
+- get_fundamentals("BMW.DE")        # Germany
+
+### When unsure:
+Use search_symbol("company name") to find the correct IB ticker.
 """
 
 
