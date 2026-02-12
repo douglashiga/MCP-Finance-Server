@@ -40,80 +40,86 @@ class MarketService:
     @staticmethod
     async def _resolve_contract(symbol: str, exchange: str = None, currency: str = 'USD') -> Optional[Contract]:
         """
-        Robust contract resolution using reqMatchingSymbols.
-        Always returns a contract with the correct primaryExchange (not SMART).
-
-        Strategy:
+        Correct IB contract resolution:
         1. Normalize the symbol (strip Yahoo suffixes).
-        2. Search IB with reqMatchingSymbols to find the real exchange.
-        3. Qualify the contract with primaryExchange for proper market data.
-        4. Fallback to direct SMART qualification if search fails.
+        2. reqMatchingSymbols → get primaryExchange + currency.
+        3. Stock(symbol, "SMART", currency, primaryExchange=X).
+        4. reqContractDetails → validate + get conId.
+        5. Return Contract(conId=X, exchange="SMART") for market data.
         """
         symbol, exchange, currency = MarketService._normalize_symbol(symbol, exchange, currency)
         logger.info(f"[RESOLVE] Input: {symbol}, exchange={exchange}, currency={currency}")
 
-        # Strategy 1: Use reqMatchingSymbols (best — gives us primaryExchange)
+        primary_exchange = exchange  # from normalization or user input
+
+        # Step 1: reqMatchingSymbols to discover the correct primaryExchange
+        if not primary_exchange:
+            try:
+                matches = await asyncio.wait_for(
+                    ib_conn.ib.reqMatchingSymbolsAsync(symbol),
+                    timeout=TIMEOUT_MARKET
+                )
+                if matches:
+                    for cd in matches:
+                        c = cd.contract
+                        if c.secType == "STK" and c.symbol == symbol:
+                            primary_exchange = c.primaryExchange
+                            currency = c.currency
+                            logger.info(f"[RESOLVE] reqMatchingSymbols → primary={primary_exchange}, currency={currency}")
+                            break
+                    # If exact match not found, use first STK
+                    if not primary_exchange:
+                        for cd in matches:
+                            c = cd.contract
+                            if c.secType == "STK":
+                                primary_exchange = c.primaryExchange
+                                currency = c.currency
+                                symbol = c.symbol  # use IB's symbol
+                                logger.info(f"[RESOLVE] reqMatchingSymbols (first STK) → {symbol} primary={primary_exchange}")
+                                break
+            except Exception as e:
+                logger.warning(f"[RESOLVE] reqMatchingSymbols failed: {e}")
+
+        # Step 2: Build contract with SMART + primaryExchange (correct pattern)
+        contract = Stock(symbol, "SMART", currency)
+        if primary_exchange:
+            contract.primaryExchange = primary_exchange
+
+        # Step 3: reqContractDetails to validate and get conId
         try:
-            matches = await asyncio.wait_for(
-                ib_conn.ib.reqMatchingSymbolsAsync(symbol),
+            details = await asyncio.wait_for(
+                ib_conn.ib.reqContractDetailsAsync(contract),
                 timeout=TIMEOUT_MARKET
             )
+            if details:
+                # Use the first match
+                validated = details[0].contract
+                logger.info(f"[RESOLVE] reqContractDetails → conId={validated.conId}, "
+                          f"symbol={validated.symbol}, primary={validated.primaryExchange}, "
+                          f"currency={validated.currency}")
 
-            if matches:
-                # Find best STK match, prefer matching currency if specified
-                best = None
-                for cd in matches:
-                    c = cd.contract
-                    if c.secType != "STK":
-                        continue
-                    # If exchange was specified from normalization, prefer that
-                    if exchange and c.primaryExchange == exchange:
-                        best = c
-                        break
-                    # If currency matches, good candidate
-                    if c.currency == currency:
-                        if not best:
-                            best = c
-                    # First STK match as fallback
-                    if not best:
-                        best = c
+                # Build final contract using conId (most reliable for market data)
+                final = Contract(conId=validated.conId, exchange="SMART")
+                final.primaryExchange = validated.primaryExchange
+                final.symbol = validated.symbol
+                final.currency = validated.currency
+                final.secType = "STK"
 
-                if best:
-                    # Use primaryExchange (NOT SMART) for market data
-                    primary = best.primaryExchange or exchange or "SMART"
-                    resolved = Stock(best.symbol, primary, best.currency)
-                    try:
-                        await asyncio.wait_for(ib_conn.ib.qualifyContractsAsync(resolved), timeout=5.0)
-                        if resolved.conId > 0:
-                            logger.info(f"[RESOLVE] {symbol} → {best.symbol} on {primary} ({best.currency}), conId={resolved.conId}")
-                            return resolved
-                    except Exception:
-                        pass
-
-                    # If primaryExchange qualification fails, try with SMART + primaryExchange
-                    resolved2 = Stock(best.symbol, "SMART", best.currency)
-                    resolved2.primaryExchange = primary
-                    try:
-                        await asyncio.wait_for(ib_conn.ib.qualifyContractsAsync(resolved2), timeout=5.0)
-                        if resolved2.conId > 0:
-                            logger.info(f"[RESOLVE] {symbol} → {best.symbol} SMART+primary={primary} ({best.currency}), conId={resolved2.conId}")
-                            return resolved2
-                    except Exception:
-                        pass
-
-        except asyncio.TimeoutError:
-            logger.warning(f"[RESOLVE] reqMatchingSymbols timeout for {symbol}")
+                # Qualify to ensure it's valid
+                await asyncio.wait_for(ib_conn.ib.qualifyContractsAsync(final), timeout=5.0)
+                if final.conId > 0:
+                    logger.info(f"[RESOLVE] Final → conId={final.conId} on SMART (primary={final.primaryExchange})")
+                    return final
         except Exception as e:
-            logger.warning(f"[RESOLVE] reqMatchingSymbols error for {symbol}: {e}")
+            logger.warning(f"[RESOLVE] reqContractDetails failed: {e}")
 
-        # Strategy 2: Direct qualification fallback
-        logger.info(f"[RESOLVE] Falling back to direct qualification for {symbol}")
-        contract = Stock(symbol, exchange or "SMART", currency)
+        # Fallback: direct qualification
+        logger.info(f"[RESOLVE] Falling back to direct qualification")
+        fallback = Stock(symbol, exchange or "SMART", currency)
         try:
-            await asyncio.wait_for(ib_conn.ib.qualifyContractsAsync(contract), timeout=5.0)
-            if contract.conId > 0:
-                logger.info(f"[RESOLVE] {symbol} → conId={contract.conId} (direct fallback)")
-                return contract
+            await asyncio.wait_for(ib_conn.ib.qualifyContractsAsync(fallback), timeout=5.0)
+            if fallback.conId > 0:
+                return fallback
         except Exception:
             pass
 
@@ -123,16 +129,17 @@ class MarketService:
     async def _fetch_market_data(contract: Contract) -> dict:
         """
         Fetch market data with delayed data fallback.
-        Returns dict with price, bid, ask, volume, close.
+        Uses the validated contract (with conId) for reliable data.
         """
         try:
             # Enable delayed data if real-time not subscribed (free)
             ib_conn.ib.reqMarketDataType(3)
 
+            # Request market data
             ticker = ib_conn.ib.reqMktData(contract, genericTickList='', snapshot=False, regulatorySnapshot=False)
 
-            # Wait for data to arrive
-            await asyncio.sleep(2)
+            # Wait for data to arrive (IB pushes asynchronously)
+            await asyncio.sleep(3)
 
             # Cancel subscription
             ib_conn.ib.cancelMktData(contract)
@@ -182,57 +189,43 @@ class MarketService:
 
     @staticmethod
     async def get_price(symbol: str, exchange: str = None, currency: str = 'USD') -> Dict[str, Any]:
-        original_input = symbol  # Keep original for Yahoo fallback
+        original_input = symbol
         logger.info(f"[PRICE] Requesting price for {symbol}")
 
         async with ib_conn.market_semaphore:
             contract = await MarketService._resolve_contract(symbol, exchange, currency)
 
             if not contract or contract.conId == 0:
-                # IB can't find it — go straight to Yahoo
                 logger.info(f"[PRICE] Contract not found on IB, trying Yahoo")
                 yahoo_sym = MarketService._to_yahoo_symbol(symbol, original_input, currency)
                 return MarketService._yahoo_fallback(yahoo_sym, source_note="Contract not found on IB")
 
-            logger.info(f"[PRICE] Using contract: {contract.symbol} exchange={contract.exchange} primary={contract.primaryExchange} currency={contract.currency}")
+            logger.info(f"[PRICE] Contract: conId={contract.conId} {contract.symbol} "
+                       f"exchange={contract.exchange} primary={contract.primaryExchange} "
+                       f"currency={contract.currency}")
 
             # Fetch market data from IB
             mkt = await MarketService._fetch_market_data(contract)
 
-            if not mkt:
-                yahoo_sym = MarketService._to_yahoo_symbol(contract.symbol, original_input, contract.currency)
-                return MarketService._yahoo_fallback(yahoo_sym, source_note="IB returned no data")
-
-            # If all values null, retry with primaryExchange
-            all_null = all(v is None for v in mkt.values())
-            if all_null and contract.primaryExchange and contract.exchange == "SMART":
-                logger.info(f"[PRICE] All null with SMART, retrying with primaryExchange={contract.primaryExchange}")
-                retry_contract = Stock(contract.symbol, contract.primaryExchange, contract.currency)
-                try:
-                    await asyncio.wait_for(ib_conn.ib.qualifyContractsAsync(retry_contract), timeout=5.0)
-                    if retry_contract.conId > 0:
-                        mkt2 = await MarketService._fetch_market_data(retry_contract)
-                        if mkt2 and not all(v is None for v in mkt2.values()):
-                            mkt = mkt2
-                            contract = retry_contract
-                except Exception:
-                    pass
-
-            # Still all null after retry? → Yahoo fallback
-            if all(v is None for v in mkt.values()):
-                logger.info(f"[PRICE] IB returned all null, falling back to Yahoo Finance")
-                yahoo_sym = MarketService._to_yahoo_symbol(contract.symbol, original_input, contract.currency)
-                return MarketService._yahoo_fallback(yahoo_sym, source_note="IB had no market data (subscription/hours)")
+            # No data or all null → Yahoo fallback
+            if not mkt or all(v is None for v in mkt.values()):
+                logger.info(f"[PRICE] IB returned no data, falling back to Yahoo Finance")
+                yahoo_sym = MarketService._to_yahoo_symbol(
+                    contract.symbol, original_input, contract.currency
+                )
+                return MarketService._yahoo_fallback(
+                    yahoo_sym,
+                    source_note="IB had no market data (no subscription or market closed)"
+                )
 
             # IB data is good!
-            data = {
+            return {"success": True, "data": {
                 "symbol": contract.symbol,
                 "exchange": contract.primaryExchange or contract.exchange,
                 "currency": contract.currency,
                 "source": "interactive_brokers",
                 **mkt,
-            }
-            return {"success": True, "data": data}
+            }}
 
     @staticmethod
     def _yahoo_fallback(yahoo_symbol: str, source_note: str = "") -> Dict[str, Any]:
