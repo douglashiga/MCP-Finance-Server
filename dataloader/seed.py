@@ -177,19 +177,29 @@ def main():
     from dataloader.scripts.load_stock_list import main as load_stocks
     load_stocks()
     
-    # 4. Trigger initial price extraction (Warm Start)
-    print("\n[BONUS] Warming up database with initial prices...")
+    # 4. Trigger initial data loading (Warm Start)
+    print("\n[BONUS] Warming up database with initial data...")
     try:
         from dataloader.scripts.extract_yahoo_prices import main as extract_prices
         from dataloader.scripts.transform_prices import main as transform_prices
+        from dataloader.scripts.load_historical_prices import main as load_historical
+        from dataloader.scripts.calculate_stock_metrics import main as calculate_metrics
         from dataloader.scripts.update_market_movers import main as update_movers
         
+        print("  → Fetching current prices...")
         extract_prices()
         transform_prices()
+        
+        print("  → Fetching historical data (required for metrics)...")
+        load_historical()
+        
+        print("  → Calculating technical metrics & movers...")
+        calculate_metrics()
         update_movers()
-        print("  ✓ Initial prices and movers loaded")
+        
+        print("  ✓ Initial data and metrics loaded")
     except Exception as e:
-        print(f"  ⚠️  Warm up failed: {e}")
+        print(f"  ⚠️  Warm up partially failed: {e}")
 
     print("\n" + "=" * 60)
     print("  ✓ Seed complete! Start the server with:")
