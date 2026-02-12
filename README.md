@@ -168,13 +168,29 @@ docker compose --profile init run seed
 
 ---
 
-## 🖥 Monitoring & Management
+## 💾 Data Persistence
 
-Access the **Data Loader UI** at `http://localhost:8001` to:
-- Monitor background job status.
-- Trigger manual health checks.
-- Browse the PostgreSQL tables directly.
-- View logs and PnL metrics.
+This project uses a **Docker Named Volume** (`postgres-data`) to store your database.
+- **Data is safe** when you stop (`docker compose stop`) or remove containers (`docker compose down`).
+- **Data is lost** only if you explicitly remove the volume: `docker compose down -v`.
+
+To back up your data, you can inspect the volume location:
+```bash
+docker volume inspect mcp_finance_postgres-data
+```
+
+---
+
+## 🖥 Monitoring & Management (Admin UI)
+
+Access the **Data Loader Dashboard** at:
+👉 **[http://localhost:8001](http://localhost:8001)**
+
+Features:
+- **Dashboard**: View active jobs, next run times, and system health.
+- **Job History**: Check logs for "Extract Prices", "Update Movers", etc.
+- **Database**: Explore the raw tables (`stocks`, `prices`, `metrics`) to verify data.
+- **Health Check**: One-click validation of the entire pipeline.
 
 ---
 
