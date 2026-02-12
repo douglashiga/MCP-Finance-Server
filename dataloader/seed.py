@@ -107,8 +107,8 @@ DEFAULT_JOBS = [
     },
     {
         "name": "Historical Prices Loader",
-        "description": "Fetches 12 months of daily OHLCV price data for all stocks",
-        "script_path": "load_historical_prices.py",
+        "description": "Fetches 1 month of daily OHLCV price data for all stocks (Incremental update)",
+        "script_path": "load_historical_prices.py --period 1mo",
         "cron_expression": "30 6 * * 1-5",  # Weekdays at 6:30 AM
         "timeout_seconds": 900,
     },
@@ -190,8 +190,8 @@ def main():
         extract_prices()
         transform_prices()
         
-        print("  → Fetching historical data (required for metrics)...")
-        load_historical()
+        print("  → Fetching historical data (5-year initial load)...")
+        load_historical(period="5y")
         
         print("  → Calculating technical metrics & movers...")
         calculate_metrics()

@@ -1,17 +1,13 @@
-#!/usr/bin/env python3
-"""
-Load Historical Prices — Fetches 12 months of daily OHLCV for all stocks.
-Uses yfinance.
-"""
 import sys
 import os
+import argparse
 import time
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from datetime import datetime
 from dataloader.database import SessionLocal, init_db
 from dataloader.models import Stock, HistoricalPrice
-
 
 def fetch_prices(symbol: str, period: str = "1y") -> list[dict]:
     """Fetch historical daily prices."""
@@ -37,7 +33,13 @@ def fetch_prices(symbol: str, period: str = "1y") -> list[dict]:
     return results
 
 
-def main():
+def main(period=None):
+    if period is None:
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--period", type=str, default="1y", help="Historical period (e.g. 1mo, 1y, 5y, max)")
+        args, _ = parser.parse_known_args()
+        period = args.period
+    
     init_db()
     session = SessionLocal()
     count = 0
@@ -46,12 +48,12 @@ def main():
     try:
         stocks = session.query(Stock).all()
         total = len(stocks)
-        print(f"[PRICES] Fetching 12-month history for {total} stocks...")
+        print(f"[PRICES] Fetching {period} history for {total} stocks...")
 
         for i, stock in enumerate(stocks, 1):
             try:
                 print(f"  [{i}/{total}] {stock.symbol}...", end=" ", flush=True)
-                prices = fetch_prices(stock.symbol)
+                prices = fetch_prices(stock.symbol, period=period)
                 
                 if prices:
                     new_count = 0
