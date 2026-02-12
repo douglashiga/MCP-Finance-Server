@@ -1,0 +1,52 @@
+services:
+
+  # ============================================================
+  # IB Gateway (headless) — runs the Interactive Brokers Gateway
+  # ============================================================
+  ib-gateway:
+    image: ghcr.io/gnzsnz/ib-gateway:latest
+    container_name: ib-gateway
+    restart: unless-stopped
+    environment:
+      TWS_USERID: ${TWS_USERID}
+      TWS_PASSWORD: ${TWS_PASSWORD}
+      TRADING_MODE: ${TRADING_MODE:-paper}
+      TWS_SETTINGS_PATH: /home/ibgateway/Jts
+      READ_ONLY_API: "yes"
+      VNC_SERVER_PASSWORD: password
+    ports:
+      - "4001:4003"   # API port (4003 inside -> 4001 host)
+      - "5901:5900"   # VNC for debugging
+    volumes:
+      - ib-gateway-settings:/home/ibgateway/Jts
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "4003"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ============================================================
+  # MCP Finance Server — connects to IB Gateway container
+  # ============================================================
+  mcp-finance:
+    build: .
+    container_name: mcp-finance
+    restart: unless-stopped
+    depends_on:
+      - ib-gateway
+    environment:
+      - IB_HOST=ib-gateway
+      - IB_PORT=4003
+      - IB_CLIENT_ID=1
+      - MCP_TRANSPORT=sse
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8000
+      - LOG_LEVEL=INFO
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./logs:/app/logs
+
+volumes:
+  ib-gateway-settings:
