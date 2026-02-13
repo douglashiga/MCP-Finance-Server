@@ -633,6 +633,83 @@ class OptionIVSnapshot(Base):
     )
 
 
+class MarketEvent(Base):
+    """
+    Unified event calendar for LLM-friendly queries.
+    Covers corporate, macro, monetary policy, geopolitical, and market structure events.
+    """
+    __tablename__ = "market_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(String(120), nullable=False, unique=True)
+    event_type = Column(String(80), nullable=False)          # earnings, cpi, fomc_meeting, option_expiration...
+    category = Column(String(40), nullable=False)            # corporate, macro, monetary_policy, geopolitical, market_structure
+    subtype = Column(String(120))
+
+    # Timing
+    event_datetime_utc = Column(DateTime, nullable=False)
+    timezone = Column(String(60), default="UTC")
+    market = Column(String(20))                              # B3, OMX, NASDAQ, NYSE, GLOBAL...
+    is_market_hours = Column(Boolean, default=False, nullable=False)
+    is_pre_market = Column(Boolean, default=False, nullable=False)
+    is_after_market = Column(Boolean, default=False, nullable=False)
+
+    # Scope
+    ticker = Column(String(30))                              # nullable for macro/systemic events
+    sector = Column(String(120))
+    country = Column(String(80))
+    region = Column(String(80))
+    affected_markets = Column(Text)                          # JSON array encoded as text
+
+    # Impact
+    expected_volatility_impact = Column(String(12))          # low, medium, high
+    systemic_risk_level = Column(String(12))                 # low, medium, high
+    is_recurring = Column(Boolean, default=False, nullable=False)
+    confidence_score = Column(Float)                         # 0..1
+
+    # Event-specific data
+    expected_eps = Column(Float)
+    previous_eps = Column(Float)
+    expected_revenue = Column(Float)
+    previous_value = Column(Float)
+    forecast_value = Column(Float)
+    actual_value = Column(Float)
+
+    source = Column(String(40), default="derived", nullable=False)
+    payload = Column(Text)                                   # raw/extra JSON
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_market_events_datetime", "event_datetime_utc"),
+        Index("ix_market_events_category", "category"),
+        Index("ix_market_events_ticker", "ticker"),
+        Index("ix_market_events_market", "market"),
+    )
+
+
+class RawMarketEvent(Base):
+    """
+    Raw event ingestion table before normalization/curation.
+    """
+    __tablename__ = "raw_market_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source = Column(String(40), nullable=False)
+    event_type = Column(String(80))
+    category = Column(String(40))
+    event_datetime_utc = Column(DateTime)
+    ticker = Column(String(30))
+    market = Column(String(20))
+    payload = Column(Text, nullable=False)
+    fetched_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_raw_market_events_datetime", "event_datetime_utc"),
+        Index("ix_raw_market_events_source", "source"),
+    )
+
+
 # ============================================================================
 # Scheduler Models
 # ============================================================================

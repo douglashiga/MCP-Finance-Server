@@ -1,0 +1,21 @@
+[
+  {
+    "event_type": "riksbank_meeting",
+    "category": "monetary_policy",
+    "subtype": "interest_rate_decision",
+    "event_datetime_utc": "2026-03-25T08:30:00Z",
+    "timezone": "Europe/Stockholm",
+    "market": "OMX",
+    "country": "Sweden",
+    "region": "Europe",
+    "affected_markets": ["OMX"],
+    "expected_volatility_impact": "high",
+    "systemic_risk_level": "high",
+    "is_recurring": true,
+    "confidence_score": 0.9,
+    "previous_value": null,
+    "forecast_value": null,
+    "actual_value": null,
+    "source": "manual"
+  }
+]

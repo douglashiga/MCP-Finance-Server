@@ -24,6 +24,7 @@ from services.job_service import JobService
 from services.option_screener_service import OptionScreenerService
 from services.classification_service import ClassificationService
 from services.wheel_service import WheelService
+from services.event_service import EventService
 
 # Local DB imports
 from dataloader.database import SessionLocal
@@ -740,6 +741,114 @@ async def stress_test_wheel_portfolio(capital_sek: float, sector_drop_percent: f
         delta_max=delta_max,
         dte_min=dte_min,
         dte_max=dte_max,
+    )
+
+
+# ============================================================================
+# Event Calendar Tools (LLM-ready normalized events)
+# ============================================================================
+
+@mcp.tool()
+async def get_event_calendar(market: str = "sweden", category: str = None, event_type: str = None,
+                             ticker: str = None, start_date: str = None, end_date: str = None,
+                             min_volatility_impact: str = "low", limit: int = 50) -> Dict[str, Any]:
+    """
+    Get normalized event calendar with filters.
+    Categories: corporate, macro, monetary_policy, geopolitical, market_structure
+    """
+    return EventService.get_event_calendar(
+        market=market,
+        category=category,
+        event_type=event_type,
+        ticker=ticker,
+        start_date=start_date,
+        end_date=end_date,
+        min_volatility_impact=min_volatility_impact,
+        limit=limit,
+    )
+
+
+@mcp.tool()
+async def get_corporate_events(market: str = "sweden", ticker: str = None,
+                               start_date: str = None, end_date: str = None,
+                               min_volatility_impact: str = "low", limit: int = 50) -> Dict[str, Any]:
+    """Corporate events affecting single names (earnings, dividends, splits, guidance, M&A, etc)."""
+    return EventService.get_events_by_category(
+        category="corporate",
+        market=market,
+        ticker=ticker,
+        start_date=start_date,
+        end_date=end_date,
+        min_volatility_impact=min_volatility_impact,
+        limit=limit,
+    )
+
+
+@mcp.tool()
+async def get_macro_events(market: str = "sweden", start_date: str = None, end_date: str = None,
+                           min_volatility_impact: str = "low", limit: int = 50) -> Dict[str, Any]:
+    """Macro calendar events (CPI, PPI, GDP, unemployment, PMI, etc)."""
+    return EventService.get_events_by_category(
+        category="macro",
+        market=market,
+        start_date=start_date,
+        end_date=end_date,
+        min_volatility_impact=min_volatility_impact,
+        limit=limit,
+    )
+
+
+@mcp.tool()
+async def get_monetary_policy_events(market: str = "sweden", start_date: str = None, end_date: str = None,
+                                     min_volatility_impact: str = "low", limit: int = 50) -> Dict[str, Any]:
+    """Central bank policy events (FOMC/ECB/Riksbank meetings, rate decisions, minutes)."""
+    return EventService.get_events_by_category(
+        category="monetary_policy",
+        market=market,
+        start_date=start_date,
+        end_date=end_date,
+        min_volatility_impact=min_volatility_impact,
+        limit=limit,
+    )
+
+
+@mcp.tool()
+async def get_geopolitical_events(market: str = "sweden", start_date: str = None, end_date: str = None,
+                                  min_volatility_impact: str = "low", limit: int = 50) -> Dict[str, Any]:
+    """Geopolitical events (sanctions, elections, energy crisis, OPEC, etc)."""
+    return EventService.get_events_by_category(
+        category="geopolitical",
+        market=market,
+        start_date=start_date,
+        end_date=end_date,
+        min_volatility_impact=min_volatility_impact,
+        limit=limit,
+    )
+
+
+@mcp.tool()
+async def get_market_structure_events(market: str = "sweden", start_date: str = None, end_date: str = None,
+                                      min_volatility_impact: str = "low", limit: int = 50) -> Dict[str, Any]:
+    """Market structure events (index rebalance, option expiration, triple witching, ETF rebalance)."""
+    return EventService.get_events_by_category(
+        category="market_structure",
+        market=market,
+        start_date=start_date,
+        end_date=end_date,
+        min_volatility_impact=min_volatility_impact,
+        limit=limit,
+    )
+
+
+@mcp.tool()
+async def get_wheel_event_risk_window(ticker: str, market: str = "sweden",
+                                      days_ahead: int = 14, limit: int = 100) -> Dict[str, Any]:
+    """
+    Event risk window for Wheel strategy decisions.
+    Returns upcoming events sorted by wheel_risk_score.
+    """
+    return EventService.get_wheel_event_risk_window(
+        ticker=ticker, market=market, days_ahead=days_ahead, limit=limit
     )
 
 

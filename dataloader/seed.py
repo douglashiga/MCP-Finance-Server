@@ -80,6 +80,14 @@ DEFAULT_JOBS = [
         "timeout_seconds": 300,
         "affected_tables": "option_iv_snapshots",
     },
+    {
+        "name": "Load Event Calendar",
+        "description": "Builds normalized events across corporate/macro/monetary/geopolitical/market structure",
+        "script_path": "load_event_calendar.py --days-ahead 180 --lookback-days 14",
+        "cron_expression": "20 */2 * * *",  # Every 2 hours
+        "timeout_seconds": 600,
+        "affected_tables": "market_events",
+    },
     
     # ===== TRANSFORMERS (Normalize raw data into domain tables) =====
     {
@@ -273,6 +281,7 @@ def main():
             from dataloader.scripts.normalize_classifications import main as normalize_classifications
             from dataloader.scripts.enrich_company_profiles import main as enrich_company_profiles
             from dataloader.scripts.curate_earnings_events import main as curate_earnings_events
+            from dataloader.scripts.load_event_calendar import main as load_event_calendar
 
             print("  → Fetching current prices...")
             extract_prices()
@@ -297,6 +306,9 @@ def main():
             print("  → Calculating technical metrics & movers...")
             calculate_metrics()
             update_movers()
+
+            print("  → Building normalized event calendar...")
+            load_event_calendar(days_ahead=180, lookback_days=14)
 
             # Validate screener baseline
             verify_session = SessionLocal()

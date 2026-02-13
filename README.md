@@ -105,6 +105,16 @@ Key normalized/curated tables used by MCP tools:
 - `build_wheel_multi_stock_plan(capital_sek, symbols=None, market='sweden', delta_min=0.25, delta_max=0.35, dte_min=4, dte_max=10, margin_requirement_pct=1.0, cash_buffer_pct=0.10)`
 - `stress_test_wheel_portfolio(capital_sek, sector_drop_percent=20.0, symbols=None, market='sweden', delta_min=0.25, delta_max=0.35, dte_min=4, dte_max=10)`
 
+### Event Calendar Tools
+
+- `get_event_calendar(market='sweden', category=None, event_type=None, ticker=None, start_date=None, end_date=None, min_volatility_impact='low', limit=50)`
+- `get_corporate_events(market='sweden', ticker=None, start_date=None, end_date=None, min_volatility_impact='low', limit=50)`
+- `get_macro_events(market='sweden', start_date=None, end_date=None, min_volatility_impact='low', limit=50)`
+- `get_monetary_policy_events(market='sweden', start_date=None, end_date=None, min_volatility_impact='low', limit=50)`
+- `get_geopolitical_events(market='sweden', start_date=None, end_date=None, min_volatility_impact='low', limit=50)`
+- `get_market_structure_events(market='sweden', start_date=None, end_date=None, min_volatility_impact='low', limit=50)`
+- `get_wheel_event_risk_window(ticker, market='sweden', days_ahead=14, limit=100)`
+
 ### Job and Pipeline Management
 
 - `list_jobs()`
@@ -128,6 +138,28 @@ Use these rules when adding/updating tools so other agents can depend on stable 
 8. Keep response keys stable; avoid breaking renames.
 9. Keep table schema stable when possible; evolve at query/service layer.
 10. Protect admin endpoints with API key and strict script-path validation.
+
+### Event Modeling Rules
+
+Use unified events in `market_events` with this minimum contract:
+
+- Identification:
+`event_id`, `event_type`, `category`, `subtype`
+- Time:
+`event_datetime_utc`, `timezone`, `market`, `is_market_hours`, `is_pre_market`, `is_after_market`
+- Scope:
+`ticker`, `sector`, `country`, `region`, `affected_markets`
+- Impact:
+`expected_volatility_impact`, `systemic_risk_level`, `is_recurring`, `confidence_score`
+- Specific data:
+`expected_eps`, `previous_eps`, `expected_revenue`, `previous_value`, `forecast_value`, `actual_value`
+
+Supported categories:
+- `corporate`
+- `macro`
+- `monetary_policy`
+- `geopolitical`
+- `market_structure`
 
 ### Stable Response Envelope
 
@@ -166,7 +198,7 @@ Major jobs in `dataloader/seed.py` include:
 - Raw ingestion: Yahoo prices/fundamentals, IBKR prices, IBKR instruments, option metrics.
 - Normalization: prices, fundamentals, classification taxonomy, company profiles.
 - Curation: earnings events.
-- Analytics: stock metrics, market movers, option IV snapshots.
+- Analytics: stock metrics, market movers, option IV snapshots, event calendar.
 - Loaders: stock list, reference data, dividends, historical prices, index performance.
 - Validation: pipeline health check.
 
@@ -202,6 +234,7 @@ python -m dataloader.app
   - `Update Market Movers`
 - If Wheel IV analysis reports insufficient history, run option metrics jobs and `Snapshot Option IV` for multiple days.
 - If option greeks are sparse, ensure IB market data permissions and option subscriptions are active.
+- For macro/monetary/geopolitical events, maintain `dataloader/data/manual_events.json` and run `Load Event Calendar`.
 
 ## License
 

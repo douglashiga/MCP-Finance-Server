@@ -45,7 +45,7 @@ def run_test_for_job(job: Job):
     
     args = [sys.executable, full_path]
     # Check if we should add --test (only for extractors and metrics)
-    if any(k in job.name for k in ["Extract", "Calculate", "Metrics", "Snapshot"]):
+    if any(k in job.name for k in ["Extract", "Calculate", "Metrics", "Snapshot", "Event"]):
         args.append("--test")
     
     # Handle existing arguments in script_path (e.g. --market B3)
