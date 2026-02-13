@@ -132,6 +132,19 @@ class JobService:
             if not os.path.exists(script_path):
                 return {"success": False, "error": f"Script not found: {job.script_path}"}
 
+            running = session.query(JobRun).filter(
+                JobRun.job_id == job.id,
+                JobRun.status == "running",
+                JobRun.finished_at.is_(None),
+            ).order_by(JobRun.started_at.desc()).first()
+            if running:
+                return {
+                    "success": False,
+                    "error": f"Job '{job.name}' is already running",
+                    "job_name": job.name,
+                    "run_id": running.id,
+                }
+
             run_id = await scheduler.trigger_job(job.id)
             if run_id is None:
                 return {"success": False, "error": f"Unable to trigger job '{job.name}'"}

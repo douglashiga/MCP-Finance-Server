@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { X, Upload, Check, AlertCircle } from 'lucide-react'
+import { X, Upload } from 'lucide-react'
 
 const CRON_PRESETS = [
     { label: 'Every Minute', value: '* * * * *' },
@@ -11,18 +11,22 @@ const CRON_PRESETS = [
     { label: 'Manual Only', value: '' },
 ]
 
-const JobModal = ({ job, onClose, onSuccess }) => {
+const JobModal = ({ job, onClose, onSuccess, onNotify }) => {
     const [formData, setFormData] = useState({
         name: '',
         description: '',
         script_path: '',
         cron_expression: '',
         is_active: true,
-        timeout_seconds: 300
+        timeout_seconds: 300,
     })
     const [loading, setLoading] = useState(false)
     const [uploading, setUploading] = useState(false)
     const [scripts, setScripts] = useState([])
+
+    const notify = (type, message) => {
+        if (onNotify) onNotify(type, message)
+    }
 
     useEffect(() => {
         if (job) {
@@ -32,7 +36,7 @@ const JobModal = ({ job, onClose, onSuccess }) => {
                 script_path: job.script_path,
                 cron_expression: job.cron_expression || '',
                 is_active: job.is_active,
-                timeout_seconds: job.timeout_seconds || 300
+                timeout_seconds: job.timeout_seconds || 300,
             })
         }
         fetchScripts()
@@ -42,14 +46,15 @@ const JobModal = ({ job, onClose, onSuccess }) => {
         try {
             const res = await fetch('/api/scripts')
             const data = await res.json()
-            setScripts(data.scripts)
+            setScripts(data.scripts || [])
         } catch (err) {
             console.error('Failed to fetch scripts', err)
+            notify('error', 'Falha ao carregar scripts')
         }
     }
 
     const handleUpload = async (e) => {
-        const file = e.target.files[0]
+        const file = e.target.files?.[0]
         if (!file) return
 
         setUploading(true)
@@ -59,13 +64,19 @@ const JobModal = ({ job, onClose, onSuccess }) => {
         try {
             const res = await fetch('/api/scripts/upload', {
                 method: 'POST',
-                body: formDataUpload
+                body: formDataUpload,
             })
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}))
+                throw new Error(err.detail || err.error || 'Upload failed')
+            }
+
             const data = await res.json()
-            setFormData(prev => ({ ...prev, script_path: data.filename }))
-            fetchScripts()
+            setFormData((prev) => ({ ...prev, script_path: data.filename }))
+            await fetchScripts()
+            notify('success', `Script ${data.filename} enviado com sucesso`)
         } catch (err) {
-            alert('Upload failed')
+            notify('error', err.message || 'Falha no upload do script')
         } finally {
             setUploading(false)
         }
@@ -82,17 +93,18 @@ const JobModal = ({ job, onClose, onSuccess }) => {
             const res = await fetch(url, {
                 method,
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(formData)
+                body: JSON.stringify(formData),
             })
 
-            if (res.ok) {
-                onSuccess()
-            } else {
-                const err = await res.json()
-                alert(`Error: ${err.detail || 'Failed to save job'}`)
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}))
+                throw new Error(err.detail || err.error || 'Failed to save job')
             }
+
+            notify('success', job ? 'Job atualizado com sucesso' : 'Job criado com sucesso')
+            onSuccess()
         } catch (err) {
-            alert('Network error')
+            notify('error', err.message || 'Falha de rede')
         } finally {
             setLoading(false)
         }
@@ -139,7 +151,7 @@ const JobModal = ({ job, onClose, onSuccess }) => {
                                 required
                             >
                                 <option value="">Select an existing script...</option>
-                                {scripts.map(s => (
+                                {scripts.map((s) => (
                                     <option key={s.filename} value={s.filename}>{s.filename}</option>
                                 ))}
                             </select>
@@ -163,14 +175,14 @@ const JobModal = ({ job, onClose, onSuccess }) => {
                         <label style={styles.label}>Schedule (Cron)</label>
                         <div style={styles.cronSection}>
                             <div style={styles.presetGrid}>
-                                {CRON_PRESETS.map(preset => (
+                                {CRON_PRESETS.map((preset) => (
                                     <button
                                         key={preset.label}
                                         type="button"
                                         style={{
                                             ...styles.presetBtn,
                                             borderColor: formData.cron_expression === preset.value ? 'var(--primary)' : 'var(--border)',
-                                            backgroundColor: formData.cron_expression === preset.value ? 'rgba(59, 130, 246, 0.1)' : 'transparent'
+                                            backgroundColor: formData.cron_expression === preset.value ? 'rgba(59, 130, 246, 0.1)' : 'transparent',
                                         }}
                                         onClick={() => setFormData({ ...formData, cron_expression: preset.value })}
                                     >
@@ -195,7 +207,10 @@ const JobModal = ({ job, onClose, onSuccess }) => {
                                 type="number"
                                 style={styles.input}
                                 value={formData.timeout_seconds}
-                                onChange={e => setFormData({ ...formData, timeout_seconds: parseInt(e.target.value) })}
+                                onChange={(e) => {
+                                    const next = parseInt(e.target.value, 10)
+                                    setFormData({ ...formData, timeout_seconds: Number.isFinite(next) ? next : 300 })
+                                }}
                             />
                         </div>
                         <div style={styles.inputGroup}>
@@ -355,7 +370,7 @@ const styles = {
         color: 'white',
         cursor: 'pointer',
         fontWeight: '600',
-    }
+    },
 }
 
 export default JobModal
