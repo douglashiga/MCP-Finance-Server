@@ -11,10 +11,11 @@ import asyncio
 import logging
 from datetime import datetime, date, timedelta
 from typing import List
+import math
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from ib_insync import Option, Stock as IBStock
+from ib_insync import Option
 from dataloader.database import SessionLocal
 from dataloader.models import Stock, OptionMetric
 from core.connection import ib_conn
@@ -24,22 +25,68 @@ from services.market_service import MarketService
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("extract_option_metrics")
 
-async def get_chains_for_stock(ib, stock_record, max_weeks=5):
+
+def _to_float(value):
+    if value is None:
+        return None
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(val) or math.isinf(val) or val == -1:
+        return None
+    return val
+
+
+def _to_int(value):
+    val = _to_float(value)
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _pick_greeks(ticker):
+    return ticker.modelGreeks or ticker.bidGreeks or ticker.askGreeks or ticker.lastGreeks
+
+def _select_expiries(expiries: List[str], today: date, limit_date: date, max_expiries: int = 3) -> List[str]:
+    candidates = []
+    for exp in expiries:
+        try:
+            exp_date = datetime.strptime(exp, '%Y%m%d').date()
+        except Exception:
+            continue
+        if today <= exp_date <= limit_date:
+            candidates.append((exp_date, exp))
+    candidates.sort(key=lambda x: x[0])
+    return [exp for _, exp in candidates[:max_expiries]]
+
+
+def _select_strikes(strikes: List[float], ref_price: float = None, max_strikes: int = 15) -> List[float]:
+    if not strikes:
+        return []
+    unique = sorted(set(float(s) for s in strikes))
+    if ref_price is None:
+        return unique[:max_strikes]
+    ranked = sorted(unique, key=lambda s: abs(s - ref_price))
+    return sorted(ranked[:max_strikes])
+
+
+async def get_chains_for_stock(ib, stock_record, max_weeks=5, max_expiries=3, max_strikes=15):
     """Fetch option chains and greeks for a single stock."""
     try:
-        # Resolve underlying contract
-        underlying = IBStock(
-            symbol=stock_record.symbol.split('.')[0] if '.' in stock_record.symbol else stock_record.symbol,
-            exchange=stock_record.exchange,
-            currency=stock_record.currency
+        # Resolve underlying contract with IB-aware normalization/exchange mapping
+        underlying = await MarketService._resolve_contract(
+            symbol=stock_record.symbol,
+            exchange=None,  # let resolver map local exchange labels to IB primary exchange
+            currency=stock_record.currency,
         )
-        qualified = await ib.qualifyContractsAsync(underlying)
-        if not qualified:
+        if not underlying:
             logger.warning(f"Could not qualify underlying {stock_record.symbol}")
             return []
-        
-        underlying = qualified[0]
-        
+
         # Request option parameters
         chains = await ib.reqSecDefOptParamsAsync(
             underlying.symbol, '', underlying.secType, underlying.conId
@@ -49,17 +96,22 @@ async def get_chains_for_stock(ib, stock_record, max_weeks=5):
             logger.warning(f"No option chains found for {stock_record.symbol}")
             return []
         
-        # Filter expiries within 5 weeks
+        # Underlying reference price to reduce strike universe.
+        mkt = await MarketService._fetch_market_data(underlying)
+        ref_price = (mkt or {}).get("price") or (mkt or {}).get("close")
+
+        # Filter expiries within max_weeks and limit chain size
         today = date.today()
         limit_date = today + timedelta(weeks=max_weeks)
         
         target_expiries = []
         for chain in chains:
-            for exp in chain.expirations:
-                # IB expiries are YYYYMMDD
-                exp_date = datetime.strptime(exp, '%Y%m%d').date()
-                if today <= exp_date <= limit_date:
-                    target_expiries.append((exp, chain))
+            # Prefer SMART/global chains when available for better liquidity coverage.
+            if chain.exchange not in {"SMART", underlying.exchange, underlying.primaryExchange}:
+                continue
+            selected_exp = _select_expiries(list(chain.expirations), today, limit_date, max_expiries=max_expiries)
+            for exp in selected_exp:
+                target_expiries.append((exp, chain))
         
         if not target_expiries:
             logger.info(f"No expiries within {max_weeks} weeks for {stock_record.symbol}")
@@ -67,12 +119,17 @@ async def get_chains_for_stock(ib, stock_record, max_weeks=5):
         
         # Build option contracts
         option_contracts = []
+        seen = set()
         for exp, chain in target_expiries:
             # Limit strikes to around current price for efficiency if needed, 
             # but for now we'll take what IB gives or filter a bit
             # For simplicity, let's take all strikes in the chain for these expiries
-            for strike in chain.strikes:
+            for strike in _select_strikes(list(chain.strikes), ref_price=ref_price, max_strikes=max_strikes):
                 for right in ['C', 'P']:
+                    key = (underlying.symbol, exp, float(strike), right, chain.exchange)
+                    if key in seen:
+                        continue
+                    seen.add(key)
                     option_contracts.append(Option(
                         symbol=underlying.symbol,
                         lastTradeDateOrContractMonth=exp,
@@ -82,6 +139,9 @@ async def get_chains_for_stock(ib, stock_record, max_weeks=5):
                         currency=underlying.currency
                     ))
         
+        if len(option_contracts) > 600:
+            option_contracts = option_contracts[:600]
+
         # Qualify all options (batching helps)
         logger.info(f"Qualifying {len(option_contracts)} options for {stock_record.symbol}...")
         # Qualify in chunks to avoid overloading
@@ -97,30 +157,39 @@ async def get_chains_for_stock(ib, stock_record, max_weeks=5):
         # Request market data (Greeks + Bid/Ask)
         logger.info(f"Requesting tickers for {len(qualified_options)} options...")
         # reqTickers is efficient for batching
-        tickers = ib.reqTickers(*qualified_options)
-        
-        # Wait a bit for tickers to populate (Greeks take a moment)
-        await asyncio.sleep(2)
+        tickers = []
+        ticker_chunk_size = 100
+        for i in range(0, len(qualified_options), ticker_chunk_size):
+            chunk = qualified_options[i:i+ticker_chunk_size]
+            batch = await ib.reqTickersAsync(*chunk)
+            tickers.extend(batch)
+            await asyncio.sleep(0.2)
         
         results = []
         for t in tickers:
-            greeks = t.modelGreeks
+            greeks = _pick_greeks(t)
+            expiry_raw = t.contract.lastTradeDateOrContractMonth or ""
+            if len(expiry_raw) >= 8:
+                expiry_date = datetime.strptime(expiry_raw[:8], '%Y%m%d').date()
+            else:
+                continue
+
             results.append({
                 "option_symbol": t.contract.localSymbol,
                 "stock_id": stock_record.id,
-                "strike": t.contract.strike,
+                "strike": _to_float(t.contract.strike),
                 "right": "CALL" if t.contract.right == 'C' else "PUT",
-                "expiry": datetime.strptime(t.contract.lastTradeDateOrContractMonth, '%Y%m%d').date(),
-                "bid": t.bid if t.bid != -1 else None,
-                "ask": t.ask if t.ask != -1 else None,
-                "last": t.last if t.last != -1 else None,
-                "volume": t.volume if t.volume != -1 else None,
-                "open_interest": t.openInterest if t.openInterest != -1 else None,
-                "delta": greeks.delta if greeks else None,
-                "gamma": greeks.gamma if greeks else None,
-                "theta": greeks.theta if greeks else None,
-                "vega": greeks.vega if greeks else None,
-                "iv": greeks.impliedVol if greeks else None,
+                "expiry": expiry_date,
+                "bid": _to_float(t.bid),
+                "ask": _to_float(t.ask),
+                "last": _to_float(t.last),
+                "volume": _to_int(t.volume),
+                "open_interest": _to_int(t.openInterest),
+                "delta": _to_float(greeks.delta) if greeks else None,
+                "gamma": _to_float(greeks.gamma) if greeks else None,
+                "theta": _to_float(greeks.theta) if greeks else None,
+                "vega": _to_float(greeks.vega) if greeks else None,
+                "iv": _to_float(greeks.impliedVol) if greeks else None,
             })
             
         return results

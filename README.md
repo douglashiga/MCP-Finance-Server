@@ -1,402 +1,208 @@
-# 🏦 MCP Finance Server
+# MCP Finance Server
 
-A professional-grade **Model Context Protocol (MCP)** server for financial data, powered by **Interactive Brokers** (real-time), **Yahoo Finance** (fundamentals), and a built-in **Stock Screener** with technical indicators.
+MCP server for market data, fundamentals, screener analytics, options analytics, and Wheel strategy workflows.
 
-Covers **3 markets**: 🇧🇷 Brazil (B3), 🇸🇪 Sweden (OMX), 🇺🇸 USA (NASDAQ/NYSE).
+This project combines:
+- Interactive Brokers (real-time market connectivity)
+- Yahoo Finance (broad coverage for fundamentals/history)
+- Local ELT pipeline (normalized + cached tables for reliable LLM queries)
 
----
+Default market for LLM-facing analytics is `sweden`.
 
-## 📐 Architecture
+## Core Goals
 
-```
-MCP_Finance/
-├── core/                          # Infrastructure Layer
-│   ├── connection.py              # IB Singleton, auto-reconnect, heartbeat
-│   ├── rate_limiter.py            # Token bucket (5 req/sec)
-│   └── decorators.py              # @require_connection
-├── services/                      # Business Logic Layer
-│   ├── market_service.py          # Real-time price (local DB + IB fallback)
-│   ├── history_service.py         # OHLCV bars + 30s cache (IB)
-│   ├── option_service.py          # Option chains & Greeks (IB)
-│   ├── account_service.py         # Balances, margin, positions (IB)
-│   ├── yahoo_service.py           # Fundamentals, dividends (local DB)
-│   ├── screener_service.py        # Stock screener & technical signals ⭐
-│   └── job_service.py             # Job management for LLM ⭐
-├── dataloader/                    # ELT Data Pipeline ⭐
-│   ├── app.py                     # Scheduler + Web UI (port 8001)
-│   ├── models.py                  # SQLAlchemy models (17 tables)
-│   ├── database.py                # SQLite/PostgreSQL support
-│   ├── seed.py                    # Initialize DB + register jobs
-│   ├── scripts/                   # Extract, Transform, Load scripts
-│   │   ├── extract_yahoo_prices.py
-│   │   ├── extract_yahoo_fundamentals.py
-│   │   ├── extract_ibkr_prices.py
-│   │   ├── transform_prices.py
-│   │   ├── transform_fundamentals.py
-│   │   ├── transform_ibkr_prices.py
-│   │   ├── calculate_stock_metrics.py    # RSI, MACD, performance ⭐
-│   │   ├── update_market_movers.py       # Top gainers/losers ⭐
-│   │   ├── load_stock_list.py
-│   │   ├── load_dividends.py
-│   │   ├── load_historical_prices.py
-│   │   └── load_index_performance.py
-│   └── static/index.html          # Data Loader Web UI
-├── mcp_server.py                  # MCP entry point (22 tools)
-├── docker-compose.yml             # IB Gateway + MCP + DataLoader
-├── test_mcp_server.py             # Unit tests (12 tests)
-├── test_integration.py            # Integration tests (11 tests)
-└── Dockerfile
+- Stable, LLM-friendly tools with explicit defaults and predictable response envelopes.
+- Reliable cached analytics from local DB first, with controlled fallbacks.
+- Fast answers for practical trading questions (screener, options, Wheel).
+- Clear data lineage from raw ingestion to curated analytics tables.
+
+## Architecture
+
+```text
+MCP-Finance-Server/
+├── mcp_server.py                    # MCP tool registry and entrypoint
+├── services/
+│   ├── market_service.py            # Price lookup and symbol resolution
+│   ├── option_service.py            # IB option chain + greeks
+│   ├── option_screener_service.py   # Cached option metrics queries
+│   ├── screener_service.py          # Stock screener + rankings
+│   ├── classification_service.py    # Sector/subsector/core business/earnings
+│   ├── wheel_service.py             # Wheel analytics (puts, calls, risk, stress)
+│   └── job_service.py               # ELT job controls
+├── dataloader/
+│   ├── models.py                    # SQLAlchemy models
+│   ├── seed.py                      # DB seed + default jobs
+│   ├── scheduler.py                 # Cron-like job runner
+│   └── scripts/                     # Extract/transform/curation scripts
+└── README.md
 ```
 
-### ELT Data Flow
+## Data Model Highlights
 
-```
-┌─────────────────────────────────────────────────┐
-│ EXTRACT (Scheduled Jobs)                        │
-│  Yahoo Prices → raw_yahoo_prices                │
-│  Yahoo Fundamentals → raw_yahoo_fundamentals    │
-│  IBKR Prices → raw_ibkr_prices                 │
-│  Historical Data → historical_prices            │
-└──────────────────┬──────────────────────────────┘
-                   ▼
-┌─────────────────────────────────────────────────┐
-│ TRANSFORM (Scheduled Jobs)                      │
-│  raw prices → realtime_prices                   │
-│  raw fundamentals → fundamentals                │
-│  historical → stock_metrics (RSI, MACD, etc)    │
-│  stock_metrics → market_movers (rankings)       │
-└──────────────────┬──────────────────────────────┘
-                   ▼
-┌─────────────────────────────────────────────────┐
-│ SERVE (MCP Tools + Dashboard)                   │
-│  22 MCP tools query local DB                    │
-│  Stock Screener Dashboard                       │
-│  Data Loader Web UI                             │
-└─────────────────────────────────────────────────┘
-```
+Key normalized/curated tables used by MCP tools:
 
----
+- `stocks`, `realtime_prices`, `historical_prices`
+- `fundamentals`, `dividends`
+- `stock_metrics`, `market_movers`
+- `option_metrics`
+- `option_iv_snapshots` (IV history snapshots from option metrics)
+- `exchanges`, `market_indices`
+- `sector_taxonomy`, `industry_taxonomy`, `subindustry_taxonomy`
+- `stock_classification_snapshots`, `company_profiles`
+- `raw_earnings_events`, `earnings_events`
 
-## 🛠 Tools (22)
+## MCP Tool Groups
 
-### Interactive Brokers (Real-time) — 6 tools
+### Market and Fundamentals
 
-| Tool | Description | Example |
-## 🛠 MCP Tool Catalog (32 Tools)
+- `get_stock_price(symbol, exchange=None, currency='USD')`
+- `get_historical_data(symbol, duration='1 D', bar_size='1 hour', exchange=None, currency='USD')`
+- `search_symbol(query)`
+- `get_fundamentals(symbol)`
+- `get_dividends(symbol)`
+- `get_company_info(symbol)`
+- `get_financial_statements(symbol)`
+- `get_exchange_info(symbol)`
+- `yahoo_search(query)`
 
-The server exposes 32 specialized tools for LLM agents to interact with financial data.
+### Stock Screener
 
-### 📈 Market Data — 8 tools
-| Tool | Description | Example |
-|------|-------------|---------|
-| `get_quote(symbol)` | Real-time prices (IBKR/Yahoo) | `get_quote("PETR4")` |
-| `get_company_info(symbol)` | Profile, sector, industry | `get_company_info("AAPL")` |
-| `get_stock_history(symbol)` | Historical OHLCV data | `get_stock_history("VALE3", "1mo")` |
-| `search_tickers(query)` | Search stocks by name/sector | `search_tickers("banco")` |
-| `get_index_components(idx)` | OMXS30, IBOV, etc | `get_index_components("IBOV")` |
-| `get_index_performance(idx)` | Historical performance data | `get_index_performance("OMXS30")` |
-| `get_ibkr_pnl()` | Real-time account PnL | `get_ibkr_pnl()` |
-| `get_ibkr_positions()` | Current open positions | `get_ibkr_positions()` |
+- `get_stock_screener(market='sweden', sector=None, sort_by='perf_1d', limit=50)`
+- `get_top_gainers(market='sweden', period='1D', limit=10)`
+- `get_top_losers(market='sweden', period='1D', limit=10)`
+- `get_most_active_stocks(market='sweden', period='1D', limit=10)`
+- `get_top_dividend_payers(market='sweden', sector=None, limit=10)`
+- `get_technical_signals(market='sweden', signal_type='oversold', limit=20)`
+- `get_highest_rsi(market='sweden', limit=10)`
+- `get_lowest_rsi(market='sweden', limit=10)`
+- `get_fundamental_rankings(market='sweden', metric='market_cap', limit=10, sector=None)`
 
-### 🔍 Stock Screener & Analytics — 5 tools ⭐
-| Tool | Description | Example |
-|------|-------------|---------|
-| `get_stock_screener(...)` | Filter by Perf, RSI, Volume | `get_stock_screener(market="usa")` |
-| `get_top_movers(market)` | Gainers, Losers, Most Active | `get_top_movers("brazil")` |
-| `get_top_dividend_payers(mkt)`| High yield rankings | `get_top_dividend_payers("sweden")` |
-| `get_technical_signals(mkt)` | RSI Oversold, Golden Cross | `get_technical_signals("usa", "oversold")` |
-| `get_market_summary(market)` | Holistic view of indices | `get_market_summary("brazil")` |
+### Classification and Earnings
 
-### 💎 Options Screener — 2 tools ⭐
-| Tool | Description | Example |
-|------|-------------|---------|
-| `get_option_screener(...)` | Filter by Delta, IV, Liquidity | `get_option_screener("AAPL", min_delta=0.2)` |
-| `get_option_chain_snapshot(sym)`| Latest cached Greeks/Quotes | `get_option_chain_snapshot("PETR4")` |
+- `get_companies_by_sector(market='sweden', sector=None, industry=None, subindustry=None, limit=50)`
+- `get_company_core_business(symbol)`
+- `get_earnings_events(symbol=None, market='sweden', upcoming_only=False, limit=20)`
 
-### 🩺 Pipeline & Health — 6 tools ⭐
-| Tool | Description | Example |
-|------|-------------|---------|
-| `run_pipeline_health_check()` | Lightweight validation of all jobs| `run_pipeline_health_check()` |
-| `get_job_status()` | Health overview of all tasks | `get_job_status()` |
-| `list_jobs()` | List all ELT schedules | `list_jobs()` |
-| `trigger_job(name)` | Manually start a data sync | `trigger_job("Extract IBKR")` |
-| `get_job_logs(name)` | View script output/errors | `get_job_logs("Update Movers")` |
-| `toggle_job(name, active)` | Enable/Disable schedules | `toggle_job("Yahoo Prices", false)` |
+### Options (Cached + Live)
 
----
+- `get_option_chain(symbol)`
+- `get_option_greeks(symbol, last_trade_date, strike, right)`
+- `get_option_screener(symbol=None, expiry=None, right=None, min_delta=None, max_delta=None, min_iv=None, max_iv=None, has_liquidity=True, limit=50)`
+- `get_option_chain_snapshot(symbol, expiry=None)`
 
-## 🤖 LLM Service Design Guidelines
+### Wheel Strategy Tools
 
-Use these rules when creating or updating MCP tools so other AI agents can reliably use this server.
+- `get_wheel_put_candidates(symbol, market='sweden', delta_min=0.25, delta_max=0.35, dte_min=4, dte_max=10, limit=5, require_liquidity=True)`
+- `get_wheel_put_annualized_return(symbol, market='sweden', target_dte=7)`
+- `get_wheel_contract_capacity(symbol, capital_sek, market='sweden', strike=None, margin_requirement_pct=1.0, cash_buffer_pct=0.0, target_dte=7)`
+- `analyze_wheel_put_risk(symbol, market='sweden', pct_below_spot=5.0, target_dte=7)`
+- `get_wheel_assignment_plan(symbol, assignment_strike, premium_received, market='sweden')`
+- `get_wheel_covered_call_candidates(symbol, average_cost, market='sweden', delta_min=0.25, delta_max=0.35, dte_min=4, dte_max=21, min_upside_pct=1.0, limit=5)`
+- `compare_wheel_premiums(symbol_a, symbol_b, market='sweden', delta_min=0.25, delta_max=0.35, dte_min=4, dte_max=10)`
+- `evaluate_wheel_iv(symbol, market='sweden', lookback_days=90, high_iv_threshold_percentile=70.0, target_dte=7)`
+- `simulate_wheel_drawdown(symbol, strike, premium_received, drop_percent=10.0, market='sweden')`
+- `compare_wheel_start_timing(symbol, market='sweden', wait_drop_percent=3.0, delta_min=0.25, delta_max=0.35, dte_min=4, dte_max=10)`
+- `build_wheel_multi_stock_plan(capital_sek, symbols=None, market='sweden', delta_min=0.25, delta_max=0.35, dte_min=4, dte_max=10, margin_requirement_pct=1.0, cash_buffer_pct=0.10)`
+- `stress_test_wheel_portfolio(capital_sek, sector_drop_percent=20.0, symbols=None, market='sweden', delta_min=0.25, delta_max=0.35, dte_min=4, dte_max=10)`
 
-### 1. Prefer intent-specific tools over generic mega-tools
+### Job and Pipeline Management
 
-- Keep a generic fallback tool (example: `get_stock_screener(...)`).
-- Add focused tools for common questions:
-- `get_highest_rsi(...)`
-- `get_lowest_rsi(...)`
-- `get_top_dividend_payers(...)`
-- `get_most_active_stocks(...)`
-- `get_fundamental_rankings(...)`
+- `list_jobs()`
+- `get_job_logs(job_name, limit=5)`
+- `trigger_job(job_name)`
+- `toggle_job(job_name, active)`
+- `get_job_status()`
+- `run_pipeline_health_check()`
 
-### 2. Always define safe defaults
+## LLM Service Design Rules
 
-- `market` default: `sweden`
-- `limit` default: `10`
-- `period` default: `1D`
-- `signal_type` default: `oversold`
-- Clamp `limit` to a safe max (example: `100`).
+Use these rules when adding/updating tools so other agents can depend on stable behavior.
 
-### 3. Response contract must be stable
+1. Prefer intent-specific tools over mega-tools.
+2. Keep safe defaults (`market='sweden'`, low-risk `limit`, bounded windows).
+3. Clamp limits and normalize known enum-style fields.
+4. Return explicit `criteria` and `empty_reason` for zero-result queries.
+5. Empty result is not a system error (`success=true`, `data=[]`).
+6. Include `as_of_date` or `as_of_datetime` when data is snapshot-based.
+7. Do not fabricate unavailable backend data; return uncertainty or insufficient-data states.
+8. Keep response keys stable; avoid breaking renames.
+9. Keep table schema stable when possible; evolve at query/service layer.
+10. Protect admin endpoints with API key and strict script-path validation.
 
-Every tool response should keep this structure:
+### Stable Response Envelope
+
+Preferred shape:
 
 ```json
 {
   "success": true,
   "data": [],
   "count": 0,
-  "market": "sweden",
-  "as_of_date": "YYYY-MM-DD",
   "criteria": {},
   "empty_reason": null
 }
 ```
 
-- `criteria`: echo effective filters used by the service.
-- `empty_reason`: set when `data=[]` (example: `no_matches_for_criteria`), otherwise `null`.
-- Keep naming consistent: use `metric_name` + `metric_value` for ranked outputs.
-- Avoid changing/removing existing keys abruptly (backward compatibility for agents/prompts).
+## Wheel Analytics Formulas
 
-### 4. Temporal robustness
+Used in `wheel_service.py` and exposed by MCP tools:
 
-- Do not rely on `date.today()` for analytics snapshots.
-- Use latest available snapshot from DB (example: max `stock_metrics.date`).
-- Return `as_of_date` / `as_of_datetime` explicitly.
+- Put period return (%) = `(premium / strike) * 100`
+- Annualized return (%) = `period_return * (365 / DTE)`
+- Cash-secured capital per contract = `strike * 100`
+- Capacity = `floor((capital * (1-cash_buffer_pct)) / (strike * 100 * margin_requirement_pct))`
+- Break-even (short put) = `strike - premium`
+- Assignment probability proxy = `abs(delta)`
+- Drawdown scenario at expiry = `max(0, break_even - final_price)`
 
-### 5. Empty results are not errors
+Notes:
+- `abs(delta)` is a proxy, not a true probability model.
+- Timing comparison tools return scenario analysis with explicit uncertainty (no forecasts).
 
-- If no rows match, return:
-- `success: true`
-- `data: []`
-- `count: 0`
-- `empty_reason: <why>`
-- Reserve `success: false` for real execution/system failures.
+## Data Pipeline Jobs (Key)
 
-### 6. Keep data model unchanged; evolve via query layer
+Major jobs in `dataloader/seed.py` include:
 
-- Do not break tables for UX improvements.
-- Improve agent usability by adding service methods/tools and better response envelopes.
+- Raw ingestion: Yahoo prices/fundamentals, IBKR prices, IBKR instruments, option metrics.
+- Normalization: prices, fundamentals, classification taxonomy, company profiles.
+- Curation: earnings events.
+- Analytics: stock metrics, market movers, option IV snapshots.
+- Loaders: stock list, reference data, dividends, historical prices, index performance.
+- Validation: pipeline health check.
 
-### 7. Security baseline for admin endpoints
+## Quick Start
 
-- Require API key for administrative HTTP endpoints (`X-API-Key`).
-- Do not use wildcard CORS in production.
-- Validate/sanitize uploaded script filenames and block path traversal.
-- Keep insecure mode only for local development (`DATALOADER_ALLOW_INSECURE=true`).
+### Docker
 
-### 8. Fundamentals ranking conventions
-
-Supported ranking metrics:
-- `market_cap`
-- `trailing_pe`
-- `forward_pe`
-- `roe`
-- `net_margin`
-- `revenue`
-- `free_cash_flow`
-- `debt_to_equity`
-
-Sorting guidance:
-- Lower-is-better metrics: `trailing_pe`, `forward_pe`, `debt_to_equity` (ascending).
-- Higher-is-better metrics: all others (descending).
-
-### 9. Agent-friendly examples
-
-- "Highest RSI today": `get_highest_rsi()`
-- "Top 5 dividend stocks in Sweden": `get_top_dividend_payers(market="sweden", limit=5)`
-- "Best ROE in Sweden": `get_fundamental_rankings(metric="roe", limit=10)`
-- "Lowest debt/equity in Sweden": `get_fundamental_rankings(metric="debt_to_equity", limit=10)`
-
----
-
-## 🏗 System Architecture (ELT)
-
-We use an **ELT (Extract, Load, Transform)** flow to ensure data is always fresh and queries are fast.
-
-1.  **EXTRACTORS**: Python scripts fetch raw JSON from Yahoo Finance and IBKR Gateway.
-2.  **LOADERS**: Raw data is stored in the PostgreSQL database.
-3.  **TRANSFORMERS/ANALYTICS**: Background jobs normalize the data and calculate technical indicators (RSI, MACD, Greeks).
-
----
-
-## 🐳 Quick Start (Docker)
-
-The easiest way to run the whole stack is using Docker Compose.
-
-### 1. Configure `.env`
-Create a `.env` file based on `.env.example`:
-```bash
-IB_HOST=ib-gateway
-IB_PORT=4003
-POSTGRES_PASSWORD=your_secure_password
-TWS_USERID=your_ibkr_user
-TWS_PASSWORD=your_ibkr_pass
-TRADING_MODE=paper
-```
-
-### 2. Launch Services
 ```bash
 docker compose up -d
-```
-This starts:
-- **PostgreSQL**: Central data storage.
-- **IB Gateway**: Headless connection to Interactive Brokers.
-- **MCP Finance Server**: The agent bridge (Port 8000).
-- **Data Loader**: The scheduler and UI (Port 8001).
-
-### 3. Initialize Database
-Run the one-shot seed script to create tables and load the initial stock list:
-```bash
 docker compose --profile init run seed
 ```
 
----
-
-## 💾 Data Persistence
-
-This project uses a **Docker Named Volume** (`postgres-data`) to store your database.
-- **Data is safe** when you stop (`docker compose stop`) or remove containers (`docker compose down`).
-- **Data is lost** only if you explicitly remove the volume: `docker compose down -v`.
-
-To back up your data, you can inspect the volume location:
-```bash
-docker volume inspect mcp_finance_postgres-data
-```
-
----
-
-## 🖥 Monitoring & Management (Admin UI)
-
-Access the **Data Loader Dashboard** at:
-👉 **[http://localhost:8001](http://localhost:8001)**
-
-Features:
-- **Dashboard**: View active jobs, next run times, and system health.
-- **Job History**: Check logs for "Extract Prices", "Update Movers", etc.
-- **Database**: Explore the raw tables (`stocks`, `prices`, `metrics`) to verify data.
-- **Health Check**: One-click validation of the entire pipeline.
-
----
-
-## 🛠 Manual Installation (Non-Docker)
-
-1. **Install dependencies**:
-   ```bash
-   pip install -e .
-   ```
-2. **Setup DB**:
-   ```bash
-   python -m dataloader.seed
-   ```
-3. **Start Services**:
-   ```bash
-   python -m mcp_server.py  # MCP bridge
-   python -m dataloader.app # Dashboard/Scheduler
-   ```
-
----
-
-## ⚙️ Configuration
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DATABASE_URL` | `sqlite:///...` | PostgreSQL: `postgresql://user:pass@host:5432/db` |
-| `IB_HOST` | `127.0.0.1` | IB Gateway host |
-| `IB_PORT` | `4001` | IB Gateway API port |
-| `IB_CLIENT_ID` | `1` | Client ID for IB connection |
-| `IB_READ_ONLY` | `true` | Read-only mode |
-| `LOG_LEVEL` | `INFO` | Logging level |
-
-### Database: PostgreSQL (Production)
+### Local
 
 ```bash
-# Set DATABASE_URL to use PostgreSQL instead of SQLite
-export DATABASE_URL="postgresql://finance:secret@localhost:5432/finance_db"
-
-# Or in docker-compose.yml, add a postgres service
+pip install -e .
+python -m dataloader.seed
+python -m mcp_server.py
+python -m dataloader.app
 ```
 
-### Database: SQLite (Development, default)
+## Security Notes
 
-No configuration needed. Data stored in `dataloader/finance_data.db`.
+- Set `DATALOADER_API_KEY` for admin API endpoints.
+- Keep `DATALOADER_ALLOW_INSECURE=true` only in local development.
+- Configure CORS with `DATALOADER_ALLOWED_ORIGINS`.
 
----
+## Operational Notes
 
-## 📊 Data Pipeline (12 Scheduled Jobs)
+- If screener returns empty, run:
+  - `Historical Prices Loader`
+  - `Calculate Stock Metrics`
+  - `Update Market Movers`
+- If Wheel IV analysis reports insufficient history, run option metrics jobs and `Snapshot Option IV` for multiple days.
+- If option greeks are sparse, ensure IB market data permissions and option subscriptions are active.
 
-| Job | Schedule | Tables | Description |
-|-----|----------|--------|-------------|
-| Extract Yahoo Prices | Every minute | `raw_yahoo_prices` | Fetch current prices |
-| Extract Yahoo Fundamentals | Daily 6 AM | `raw_yahoo_fundamentals` | Fetch PE, EPS, etc |
-| Extract IBKR Prices | Every 2 min | `raw_ibkr_prices` | Real-time from IB Gateway |
-| Extract Option Metrics - B3 | Every 15 min | `option_metrics` | Greeks, bid/ask for B3 |
-| Extract Option Metrics - US | Every 30 min | `option_metrics` | Greeks, bid/ask for US |
-| Extract Option Metrics - OMX | Every hour | `option_metrics` | Greeks, bid/ask for OMX |
-| Transform Prices | Every 2 min | `realtime_prices` | Normalize price data |
-| Transform IBKR Prices | Every 3 min | `realtime_prices` | IBKR → normalized |
-| Transform Fundamentals | Daily 6:30 AM | `fundamentals` | Normalize fundamentals |
-| Stock List Loader | Weekly Sun 5 AM | `stocks` | Refresh stock list |
-| Dividends Loader | Weekly Mon 7 AM | `dividends` | Fetch dividend data |
-| Historical Prices | Weekdays 6:30 AM | `historical_prices` | 12 months OHLCV |
-| Index Performance | Weekly Mon 8 AM | `index_performance` | IBOV, OMXS30 data |
-| **Calculate Stock Metrics** | **Daily 7 AM** | **`stock_metrics`** | **RSI, MACD, performance** |
-| **Update Market Movers** | **Every 5 min** | **`market_movers`** | **Top gainers/losers** |
-
----
-
-## 🏦 Markets Covered
-
-| Market | Exchange | Stocks | Currency | Indices |
-|--------|----------|--------|----------|---------|
-| 🇧🇷 Brazil | B3 | 21 | BRL | IBOV |
-| 🇸🇪 Sweden | OMX | 30 | SEK | OMXS30, OMXSPI |
-| 🇺🇸 USA | NASDAQ/NYSE | 20 | USD | S&P 500 |
-
----
-
-## 🧪 Tests
-
-```bash
-# Unit tests (12 — mock-based)
-pytest test_mcp_server.py -v
-
-# Integration tests (11 — real database)
-pytest test_integration.py -v
-
-# All tests
-pytest -v
-```
-
----
-
-## 📦 Dependencies
-
-| Package | Purpose |
-|---------|---------|
-| `mcp` | Model Context Protocol framework |
-| `ib_insync` | Interactive Brokers API |
-| `yfinance` | Yahoo Finance data |
-| `sqlalchemy` | Database ORM (SQLite + PostgreSQL) |
-| `fastapi` | Data Loader Web API |
-| `apscheduler` | Job scheduling |
-| `pandas` / `numpy` | Technical indicator calculations |
-| `psycopg2-binary` | PostgreSQL driver (optional) |
-
----
-
-## 📄 License
+## License
 
 MIT

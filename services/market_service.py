@@ -16,12 +16,36 @@ with open(_MAP_PATH) as f:
 
 
 class MarketService:
+    @staticmethod
+    def _normalize_exchange_code(exchange: str = None) -> Optional[str]:
+        """
+        Normalize local exchange labels to IB-compatible primary exchange codes.
+        Returns None when exchange should be auto-discovered.
+        """
+        if not exchange:
+            return None
+
+        ex = exchange.strip().upper()
+
+        local_to_ib = {
+            "B3": "BOVESPA",
+            "OMX": "SFB",
+            "STO": "SFB",
+        }
+
+        # For US labels we prefer auto-discovery (reqMatchingSymbols) instead of forcing primary exchange.
+        auto_discovery = {"NASDAQ", "NYSE", "US", "USA", "SMART", "ALL"}
+        if ex in auto_discovery:
+            return None
+
+        return local_to_ib.get(ex, ex)
 
     @staticmethod
     def _normalize_symbol(symbol: str, exchange: str = None, currency: str = 'USD') -> Tuple[str, str, str]:
         """
         Clean Yahoo/Bloomberg-style ticker → IB format using regex + JSON map.
         """
+        normalized_exchange = MarketService._normalize_exchange_code(exchange)
         match = re.match(r'^(.+)\.([A-Z]{1,2})$', symbol.upper())
 
         if match:
@@ -32,10 +56,10 @@ class MarketService:
                 info = EXCHANGE_MAP[suffix]
                 clean = base.replace("-", "")
                 logger.info(f"[NORMALIZE] {symbol} → {clean} on {info['exchange']} ({info['currency']})")
-                return clean, exchange or info["exchange"], info["currency"]
+                return clean, normalized_exchange or info["exchange"], info["currency"]
 
         clean = symbol.replace("-", "")
-        return clean, exchange, currency
+        return clean, normalized_exchange, currency
 
     @staticmethod
     async def _resolve_contract(symbol: str, exchange: str = None, currency: str = 'USD') -> Optional[Contract]:

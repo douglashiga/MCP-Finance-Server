@@ -8,6 +8,7 @@ import sys
 import os
 import subprocess
 import logging
+import shlex
 from datetime import datetime
 from typing import List
 
@@ -29,17 +30,27 @@ def run_test_for_job(job: Job):
     # Build command
     # If it's a script that supports --test, add it
     # We check if the script is in our "testable" list
-    name_to_script = job.script_path.split(' ')[0]
+    parts = shlex.split(job.script_path)
+    if not parts:
+        return {
+            "status": "failed",
+            "stdout": "",
+            "stderr": f"Invalid script path for job {job.name}",
+            "duration": 0,
+            "exit_code": 1
+        }
+
+    name_to_script = parts[0]
     full_path = os.path.join(SCRIPTS_DIR, name_to_script)
     
-    args = ["python", full_path]
+    args = [sys.executable, full_path]
     # Check if we should add --test (only for extractors and metrics)
-    if any(k in job.name for k in ["Extract", "Calculate", "Metrics"]):
+    if any(k in job.name for k in ["Extract", "Calculate", "Metrics", "Snapshot"]):
         args.append("--test")
     
     # Handle existing arguments in script_path (e.g. --market B3)
-    if ' ' in job.script_path:
-        extra_args = job.script_path.split(' ')[1:]
+    if len(parts) > 1:
+        extra_args = parts[1:]
         args.extend(extra_args)
         
     start_time = datetime.utcnow()

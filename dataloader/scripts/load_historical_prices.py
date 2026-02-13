@@ -2,12 +2,26 @@ import sys
 import os
 import argparse
 import time
+import math
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from datetime import datetime
 from dataloader.database import SessionLocal, init_db
 from dataloader.models import Stock, HistoricalPrice
+
+
+def _to_float(value):
+    """Convert value to finite float or None."""
+    if value is None:
+        return None
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(val) or math.isinf(val):
+        return None
+    return val
 
 def fetch_prices(symbol: str, period: str = "1y") -> list[dict]:
     """Fetch historical daily prices."""
@@ -21,13 +35,23 @@ def fetch_prices(symbol: str, period: str = "1y") -> list[dict]:
     
     results = []
     for date, row in hist.iterrows():
+        open_v = _to_float(row.get("Open"))
+        high_v = _to_float(row.get("High"))
+        low_v = _to_float(row.get("Low"))
+        close_v = _to_float(row.get("Close"))
+        volume_v = _to_float(row.get("Volume"))
+
+        # Skip rows without a valid close. These rows poison technical metrics.
+        if close_v is None or close_v <= 0:
+            continue
+
         results.append({
             "date": date.date() if hasattr(date, 'date') else date,
-            "open": float(row.get("Open", 0)) if row.get("Open") is not None else None,
-            "high": float(row.get("High", 0)) if row.get("High") is not None else None,
-            "low": float(row.get("Low", 0)) if row.get("Low") is not None else None,
-            "close": float(row.get("Close", 0)) if row.get("Close") is not None else None,
-            "volume": float(row.get("Volume", 0)) if row.get("Volume") is not None else None,
+            "open": open_v,
+            "high": high_v,
+            "low": low_v,
+            "close": close_v,
+            "volume": volume_v,
         })
     
     return results

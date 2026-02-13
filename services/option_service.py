@@ -4,10 +4,29 @@ import datetime
 from typing import Dict, Any, List, Optional
 from ib_insync import Stock, Option, util
 from core.connection import ib_conn, TIMEOUT_MARKET
+from services.market_service import MarketService
 
 logger = logging.getLogger(__name__)
 
 class OptionService:
+    @staticmethod
+    def _to_float(value):
+        if value is None:
+            return None
+        try:
+            if util.isNan(value):
+                return None
+        except Exception:
+            pass
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _pick_greeks(ticker):
+        return ticker.modelGreeks or ticker.bidGreeks or ticker.askGreeks or ticker.lastGreeks
+
     @staticmethod
     async def get_option_chain(symbol: str, exchange: str = 'SMART', sec_type: str = 'STK', currency: str = 'USD') -> Dict[str, Any]:
         """
@@ -16,8 +35,8 @@ class OptionService:
         """
         logger.info(f"[OPTIONS] Requesting option chain for {symbol}")
         
-        # 1. Qualify the underlying
-        underlying = Stock(symbol, exchange, currency) if sec_type == 'STK' else None
+        # 1. Resolve underlying contract with robust mapping/qualification
+        underlying = await MarketService._resolve_contract(symbol, exchange, currency) if sec_type == 'STK' else None
         # TODO: Support other underlying types if needed
         
         if not underlying:
@@ -25,8 +44,6 @@ class OptionService:
 
         async with ib_conn.market_semaphore:
             try:
-                await asyncio.wait_for(ib_conn.ib.qualifyContractsAsync(underlying), timeout=2.0)
-                
                 # 2. Request Security Definition Option Parameters
                 chains = await asyncio.wait_for(
                     ib_conn.ib.reqSecDefOptParamsAsync(
@@ -42,28 +59,32 @@ class OptionService:
         if not chains:
              return {"success": False, "error": f"No option chain found for {symbol}"}
 
-        # Organize data: usually multiple exchanges return similar chains. 
-        # We'll merge them or return the SMART one if possible.
-        
-        # Simple aggregation
+        # Prefer SMART chain, fallback to all exchanges if SMART is unavailable.
         all_expirations = set()
         all_strikes = set()
-        
-        for chain in chains:
-            if chain.exchange == 'SMART':
-                 all_expirations.update(chain.expirations)
-                 all_strikes.update(chain.strikes)
+        preferred = [c for c in chains if c.exchange == 'SMART']
+        selected_chains = preferred if preferred else chains
+
+        for chain in selected_chains:
+            all_expirations.update(chain.expirations)
+            all_strikes.update(chain.strikes)
+
+        if not all_expirations or not all_strikes:
+            return {"success": False, "error": f"Option chain unavailable for {symbol}"}
 
         # Retrieve multiplier from first chain if available
-        multiplier = chains[0].multiplier if chains else "100"
+        multiplier = selected_chains[0].multiplier if selected_chains else "100"
 
         return {
             "success": True, 
             "data": {
                 "underlying": symbol,
+                "underlying_con_id": underlying.conId,
                 "multiplier": multiplier,
                 "expirations": sorted(list(all_expirations)),
-                "strikes": sorted(list(all_strikes))
+                "strikes": sorted(list(all_strikes)),
+                "exchanges": sorted(list({c.exchange for c in selected_chains if c.exchange})),
+                "as_of_datetime": datetime.datetime.utcnow().isoformat(),
             }
         }
 
@@ -76,17 +97,22 @@ class OptionService:
         """
         logger.info(f"[GREEKS] Requesting greeks for {symbol} {last_trade_date} {strike} {right}")
         
-        contract = Option(symbol, last_trade_date, strike, right, exchange)
+        normalized_right = (right or "").upper()
+        if normalized_right in {"CALL", "C"}:
+            normalized_right = "C"
+        elif normalized_right in {"PUT", "P"}:
+            normalized_right = "P"
+        else:
+            return {"success": False, "error": "Invalid right. Use C/P or CALL/PUT"}
+
+        clean_symbol, _, _ = MarketService._normalize_symbol(symbol, exchange, "USD")
+        contract = Option(clean_symbol, last_trade_date, strike, normalized_right, exchange)
         
         async with ib_conn.market_semaphore:
             try:
                 await asyncio.wait_for(ib_conn.ib.qualifyContractsAsync(contract), timeout=2.0)
                 
-                # Request ticker with greeks
-                # we might need to enable generic ticks for greeks if not default? 
-                # 100: Option Volume, 101: Option Open Interest, 106: Option Implied Vol?
-                # Usually snapshot=True provides model greeks if calculator is active
-                
+                ib_conn.ib.reqMarketDataType(3)
                 tickers = await asyncio.wait_for(
                     ib_conn.ib.reqTickersAsync(contract),
                     timeout=TIMEOUT_MARKET
@@ -101,22 +127,21 @@ class OptionService:
             
         t = tickers[0]
         
-        # Greeks are in t.modelGreeks (if available) or t.bidGreeks/t.askGreeks
-        # We prefer modelGreeks
-        greeks = t.modelGreeks
+        greeks = OptionService._pick_greeks(t)
         
         data = {
             "conId": contract.conId,
             "symbol": contract.localSymbol,
-            "bid": t.bid,
-            "ask": t.ask,
-            "last": t.last,
-            "impliedVol": greeks.impliedVol if greeks else None,
-            "delta": greeks.delta if greeks else None,
-            "gamma": greeks.gamma if greeks else None,
-            "vega": greeks.vega if greeks else None,
-            "theta": greeks.theta if greeks else None,
-            "undPrice": greeks.undPrice if greeks else None
+            "bid": OptionService._to_float(t.bid),
+            "ask": OptionService._to_float(t.ask),
+            "last": OptionService._to_float(t.last),
+            "impliedVol": OptionService._to_float(greeks.impliedVol) if greeks else None,
+            "delta": OptionService._to_float(greeks.delta) if greeks else None,
+            "gamma": OptionService._to_float(greeks.gamma) if greeks else None,
+            "vega": OptionService._to_float(greeks.vega) if greeks else None,
+            "theta": OptionService._to_float(greeks.theta) if greeks else None,
+            "undPrice": OptionService._to_float(greeks.undPrice) if greeks else None,
+            "as_of_datetime": datetime.datetime.utcnow().isoformat(),
         }
         
         return {"success": True, "data": data}

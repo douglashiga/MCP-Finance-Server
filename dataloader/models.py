@@ -15,6 +15,83 @@ Base = declarative_base()
 # Finance Data Models
 # ============================================================================
 
+class Exchange(Base):
+    """Normalized exchange reference catalog."""
+    __tablename__ = "exchanges"
+
+    code = Column(String(20), primary_key=True)                # e.g. B3, OMX, NASDAQ, NYSE
+    name = Column(String(120), nullable=False)
+    country = Column(String(60))
+    currency = Column(String(10))
+    yahoo_suffix = Column(String(10))                          # e.g. .SA, .ST
+    ib_primary_exchange = Column(String(30))                   # e.g. BOVESPA, SFB
+    timezone = Column(String(60))
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class MarketIndex(Base):
+    """Normalized market index universe (used by index loaders and dashboards)."""
+    __tablename__ = "market_indices"
+
+    symbol = Column(String(20), primary_key=True)              # e.g. ^BVSP
+    name = Column(String(120), nullable=False)                 # e.g. Ibovespa
+    exchange_code = Column(String(20), ForeignKey("exchanges.code"), nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    exchange = relationship("Exchange")
+
+
+class SectorTaxonomy(Base):
+    """Canonical sector taxonomy."""
+    __tablename__ = "sector_taxonomy"
+
+    code = Column(String(60), primary_key=True)               # e.g. financials
+    name = Column(String(120), nullable=False, unique=True)   # e.g. Financials
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class IndustryTaxonomy(Base):
+    """Canonical industry taxonomy linked to a sector."""
+    __tablename__ = "industry_taxonomy"
+
+    code = Column(String(80), primary_key=True)               # e.g. banking
+    sector_code = Column(String(60), ForeignKey("sector_taxonomy.code"), nullable=False)
+    name = Column(String(140), nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    sector = relationship("SectorTaxonomy")
+
+    __table_args__ = (
+        UniqueConstraint("sector_code", "name", name="uq_industry_sector_name"),
+    )
+
+
+class SubIndustryTaxonomy(Base):
+    """Canonical sub-industry taxonomy linked to an industry."""
+    __tablename__ = "subindustry_taxonomy"
+
+    code = Column(String(120), primary_key=True)
+    industry_code = Column(String(80), ForeignKey("industry_taxonomy.code"), nullable=False)
+    name = Column(String(180), nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    industry = relationship("IndustryTaxonomy")
+
+    __table_args__ = (
+        UniqueConstraint("industry_code", "name", name="uq_subindustry_industry_name"),
+    )
+
+
 class Stock(Base):
     """Stock registry — each tradeable instrument."""
     __tablename__ = "stocks"
@@ -42,6 +119,54 @@ class Stock(Base):
 
     def __repr__(self):
         return f"<Stock {self.symbol} ({self.exchange})>"
+
+
+class StockClassificationSnapshot(Base):
+    """Classification snapshots per stock from multiple sources (IBKR, Yahoo, merged)."""
+    __tablename__ = "stock_classification_snapshots"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    stock_id = Column(Integer, ForeignKey("stocks.id", ondelete="CASCADE"), nullable=False)
+    source = Column(String(30), nullable=False)               # ibkr, yahoo, merged
+    as_of = Column(DateTime, default=datetime.utcnow, nullable=False)
+    is_current = Column(Boolean, default=True, nullable=False)
+
+    raw_sector = Column(String(160))
+    raw_industry = Column(String(200))
+    raw_subindustry = Column(String(240))
+
+    sector_code = Column(String(60), ForeignKey("sector_taxonomy.code"))
+    industry_code = Column(String(80), ForeignKey("industry_taxonomy.code"))
+    subindustry_code = Column(String(120), ForeignKey("subindustry_taxonomy.code"))
+    confidence = Column(Float)                                # 0..1 score
+
+    stock = relationship("Stock")
+    sector = relationship("SectorTaxonomy")
+    industry = relationship("IndustryTaxonomy")
+    subindustry = relationship("SubIndustryTaxonomy")
+
+    __table_args__ = (
+        Index("ix_stock_cls_stock_current", "stock_id", "is_current"),
+        Index("ix_stock_cls_sector_current", "sector_code", "is_current"),
+        Index("ix_stock_cls_industry_current", "industry_code", "is_current"),
+    )
+
+
+class CompanyProfile(Base):
+    """Enriched company profile for LLM-style business context (what company does/core business)."""
+    __tablename__ = "company_profiles"
+
+    stock_id = Column(Integer, ForeignKey("stocks.id", ondelete="CASCADE"), primary_key=True)
+    source = Column(String(30), nullable=False, default="yahoo")
+    website = Column(String(250))
+    country = Column(String(80))
+    city = Column(String(120))
+    employees = Column(Integer)
+    business_summary = Column(Text)
+    core_business = Column(Text)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    stock = relationship("Stock")
 
 
 class Fundamental(Base):
@@ -251,6 +376,99 @@ class RawIBKRPrice(Base):
     )
 
 
+class RawIBKRContract(Base):
+    """Raw contract details snapshot from IBKR for a symbol."""
+    __tablename__ = "raw_ibkr_contracts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(50), nullable=False)
+    con_id = Column(Integer)
+    exchange = Column(String(50))
+    primary_exchange = Column(String(50))
+    currency = Column(String(10))
+    sec_type = Column(String(20))
+    data = Column(Text, nullable=False)  # JSON payload from contract details
+    fetched_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_raw_ibkr_contracts_symbol_date", "symbol", "fetched_at"),
+        Index("ix_raw_ibkr_contracts_conid", "con_id"),
+    )
+
+
+class RawIBKROptionParam(Base):
+    """Raw sec-def option parameters from IBKR (expiries, strikes, trading class)."""
+    __tablename__ = "raw_ibkr_option_params"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(50), nullable=False)
+    underlying_con_id = Column(Integer, nullable=False)
+    exchange = Column(String(50))
+    trading_class = Column(String(50))
+    multiplier = Column(String(20))
+    data = Column(Text, nullable=False)  # JSON payload from reqSecDefOptParams
+    fetched_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_raw_ibkr_opt_params_symbol_date", "symbol", "fetched_at"),
+        Index("ix_raw_ibkr_opt_params_conid", "underlying_con_id"),
+    )
+
+
+class RawEarningsEvent(Base):
+    """Raw earnings events from source providers before curation."""
+    __tablename__ = "raw_earnings_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    stock_id = Column(Integer, ForeignKey("stocks.id", ondelete="CASCADE"), nullable=False)
+    source = Column(String(30), nullable=False)               # yahoo, ibkr, scrape...
+    event_type = Column(String(20), nullable=False)           # history, upcoming
+    event_date = Column(Date, nullable=False)
+    event_datetime = Column(DateTime)
+    period_ending = Column(Date)
+    eps_estimate = Column(Float)
+    eps_actual = Column(Float)
+    surprise_percent = Column(Float)
+    revenue_estimate = Column(Float)
+    revenue_actual = Column(Float)
+    currency = Column(String(10))
+    payload = Column(Text)                                    # raw JSON excerpt
+    fetched_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    stock = relationship("Stock")
+
+    __table_args__ = (
+        Index("ix_raw_earnings_stock_date", "stock_id", "event_date"),
+        Index("ix_raw_earnings_source_date", "source", "event_date"),
+    )
+
+
+class EarningsEvent(Base):
+    """Curated earnings event (best available record by stock/date)."""
+    __tablename__ = "earnings_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    stock_id = Column(Integer, ForeignKey("stocks.id", ondelete="CASCADE"), nullable=False)
+    event_date = Column(Date, nullable=False)
+    event_datetime = Column(DateTime)
+    period_ending = Column(Date)
+    eps_estimate = Column(Float)
+    eps_actual = Column(Float)
+    surprise_percent = Column(Float)
+    revenue_estimate = Column(Float)
+    revenue_actual = Column(Float)
+    source = Column(String(30), nullable=False)
+    quality_score = Column(Float, default=0.0)
+    curated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    stock = relationship("Stock")
+
+    __table_args__ = (
+        UniqueConstraint("stock_id", "event_date", name="uq_earnings_event_stock_date"),
+        Index("ix_earnings_events_stock_date", "stock_id", "event_date"),
+    )
+
+
 # ============================================================================
 # Normalized Real-time Data (ELT: Transform Layer Output)
 # ============================================================================
@@ -384,6 +602,34 @@ class OptionMetric(Base):
         UniqueConstraint("option_symbol", name="uq_option_symbol"),
         Index("ix_option_metrics_stock_expiry", "stock_id", "expiry"),
         Index("ix_option_metrics_expiry", "expiry"),
+    )
+
+
+class OptionIVSnapshot(Base):
+    """
+    Historical IV snapshot derived from option_metrics.
+    Used for IV percentile/relative-value analysis (e.g., Wheel strategy timing).
+    """
+    __tablename__ = "option_iv_snapshots"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    stock_id = Column(Integer, ForeignKey("stocks.id", ondelete="CASCADE"), nullable=False)
+    snapshot_date = Column(Date, nullable=False)
+    snapshot_datetime = Column(DateTime, nullable=False)
+
+    # Near-term IV summary (typically nearest expiry put chain)
+    atm_iv = Column(Float)             # IV from strike closest to spot
+    median_iv = Column(Float)          # Median IV of the sampled chain
+    p25_iv = Column(Float)
+    p75_iv = Column(Float)
+    sample_size = Column(Integer)
+    source = Column(String(30), default="option_metrics", nullable=False)
+
+    stock = relationship("Stock")
+
+    __table_args__ = (
+        UniqueConstraint("stock_id", "snapshot_date", name="uq_option_iv_snapshot_stock_date"),
+        Index("ix_option_iv_snapshot_stock_date", "stock_id", "snapshot_date"),
     )
 
 

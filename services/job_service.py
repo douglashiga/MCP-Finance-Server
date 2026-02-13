@@ -4,6 +4,7 @@ data loader jobs via MCP tools.
 """
 import logging
 import os
+import shlex
 from sqlalchemy import func
 from dataloader.database import SessionLocal
 from dataloader.models import Job, JobRun
@@ -123,7 +124,11 @@ class JobService:
             if not job:
                 return {"success": False, "error": error}
 
-            script_path = os.path.join(SCRIPTS_DIR, job.script_path)
+            command_parts = shlex.split(job.script_path)
+            if not command_parts:
+                return {"success": False, "error": f"Invalid script path for job '{job.name}'"}
+            script_file = command_parts[0]
+            script_path = os.path.join(SCRIPTS_DIR, script_file)
             if not os.path.exists(script_path):
                 return {"success": False, "error": f"Script not found: {job.script_path}"}
 

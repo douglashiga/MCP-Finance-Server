@@ -8,17 +8,17 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from datetime import datetime, date
-from sqlalchemy import and_
+from datetime import datetime
+from sqlalchemy import and_, func
 from dataloader.database import SessionLocal
-from dataloader.models import Stock, StockMetrics, MarketMover, RealtimePrice
+from dataloader.models import Stock, StockMetrics, MarketMover
 
 
 MARKETS = {
-    "B3": ["SA"],           # Brazilian stocks
-    "OMX": ["ST"],          # Swedish stocks  
-    "NASDAQ": [],           # Will filter by exchange
-    "NYSE": []              # Will filter by exchange
+    "B3": ["B3"],
+    "OMX": ["OMX"],
+    "NASDAQ": ["NASDAQ"],
+    "NYSE": ["NYSE"],
 }
 
 PERIODS = ["1D", "1W", "1M"]
@@ -27,22 +27,11 @@ TOP_N = 10
 
 def get_stocks_by_market(session, market):
     """Get all stocks for a specific market."""
-    if market in ["NASDAQ", "NYSE"]:
-        return session.query(Stock).filter(Stock.exchange == market).all()
-    else:
-        # Filter by symbol suffix
-        suffixes = MARKETS.get(market, [])
-        stocks = []
-        for suffix in suffixes:
-            stocks.extend(
-                session.query(Stock).filter(
-                    Stock.symbol.like(f"%.{suffix}")
-                ).all()
-            )
-        return stocks
+    exchanges = MARKETS.get(market, [market])
+    return session.query(Stock).filter(Stock.exchange.in_(exchanges)).all()
 
 
-def update_top_gainers(session, market, period, today):
+def update_top_gainers(session, market, period, metrics_date):
     """Find top N gainers for a market/period."""
     stocks = get_stocks_by_market(session, market)
     stock_ids = [s.id for s in stocks]
@@ -67,7 +56,7 @@ def update_top_gainers(session, market, period, today):
     ).filter(
         and_(
             StockMetrics.stock_id.in_(stock_ids),
-            StockMetrics.date == today,
+            StockMetrics.date == metrics_date,
             perf_field.isnot(None)
         )
     ).order_by(perf_field.desc()).limit(TOP_N).all()
@@ -96,7 +85,7 @@ def update_top_gainers(session, market, period, today):
     return len(top_gainers)
 
 
-def update_top_losers(session, market, period, today):
+def update_top_losers(session, market, period, metrics_date):
     """Find top N losers (worst performers) for a market/period."""
     stocks = get_stocks_by_market(session, market)
     stock_ids = [s.id for s in stocks]
@@ -121,7 +110,7 @@ def update_top_losers(session, market, period, today):
     ).filter(
         and_(
             StockMetrics.stock_id.in_(stock_ids),
-            StockMetrics.date == today,
+            StockMetrics.date == metrics_date,
             perf_field.isnot(None)
         )
     ).order_by(perf_field.asc()).limit(TOP_N).all()
@@ -150,7 +139,7 @@ def update_top_losers(session, market, period, today):
     return len(top_losers)
 
 
-def update_most_active(session, market, today):
+def update_most_active(session, market, metrics_date):
     """Find most active stocks by volume."""
     stocks = get_stocks_by_market(session, market)
     stock_ids = [s.id for s in stocks]
@@ -165,7 +154,7 @@ def update_most_active(session, market, today):
     ).filter(
         and_(
             StockMetrics.stock_id.in_(stock_ids),
-            StockMetrics.date == today,
+            StockMetrics.date == metrics_date,
             StockMetrics.avg_volume_10d.isnot(None)
         )
     ).order_by(StockMetrics.avg_volume_10d.desc()).limit(TOP_N).all()
@@ -197,23 +186,28 @@ def update_most_active(session, market, today):
 def main():
     session = SessionLocal()
     count = 0
-    today = date.today()
     
     try:
-        print(f"[UPDATE MOVERS] Updating market movers for {today}...")
+        metrics_date = session.query(func.max(StockMetrics.date)).scalar()
+        if not metrics_date:
+            print("[UPDATE MOVERS] No stock_metrics data found. Skipping.")
+            print("RECORDS_AFFECTED=0")
+            return
+
+        print(f"[UPDATE MOVERS] Updating market movers for metrics_date={metrics_date}...")
         
         for market in MARKETS.keys():
             print(f"\n  Processing market: {market}")
             
             # Top gainers and losers for each period
             for period in PERIODS:
-                gainers = update_top_gainers(session, market, period, today)
-                losers = update_top_losers(session, market, period, today)
+                gainers = update_top_gainers(session, market, period, metrics_date)
+                losers = update_top_losers(session, market, period, metrics_date)
                 print(f"    {period}: {gainers} gainers, {losers} losers")
                 count += gainers + losers
             
             # Most active (1D only)
-            active = update_most_active(session, market, today)
+            active = update_most_active(session, market, metrics_date)
             print(f"    Most Active: {active} stocks")
             count += active
         

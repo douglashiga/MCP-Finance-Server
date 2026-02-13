@@ -6,17 +6,30 @@ Covers: ^BVSP (Ibovespa), ^OMX (OMXS30), ^OMXSPI.
 import sys
 import os
 import time
+import math
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from datetime import datetime
 from dataloader.database import SessionLocal, init_db
-from dataloader.models import IndexPerformance
+from dataloader.models import IndexPerformance, MarketIndex
 
-INDICES = [
+FALLBACK_INDICES = [
     {"symbol": "^BVSP", "name": "Ibovespa"},
     {"symbol": "^OMX", "name": "OMXS30"},
     {"symbol": "^OMXSPI", "name": "OMX Stockholm PI"},
 ]
+
+
+def _to_float(value):
+    if value is None:
+        return None
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(val) or math.isinf(val):
+        return None
+    return val
 
 
 def fetch_index_data(symbol: str, period: str = "5y") -> list[dict]:
@@ -31,13 +44,17 @@ def fetch_index_data(symbol: str, period: str = "5y") -> list[dict]:
     
     results = []
     for date, row in hist.iterrows():
+        close_v = _to_float(row.get("Close"))
+        if close_v is None or close_v <= 0:
+            continue
+
         results.append({
             "date": date.date() if hasattr(date, 'date') else date,
-            "open": float(row.get("Open", 0)) if row.get("Open") is not None else None,
-            "high": float(row.get("High", 0)) if row.get("High") is not None else None,
-            "low": float(row.get("Low", 0)) if row.get("Low") is not None else None,
-            "close": float(row.get("Close", 0)) if row.get("Close") is not None else None,
-            "volume": float(row.get("Volume", 0)) if row.get("Volume") is not None else None,
+            "open": _to_float(row.get("Open")),
+            "high": _to_float(row.get("High")),
+            "low": _to_float(row.get("Low")),
+            "close": close_v,
+            "volume": _to_float(row.get("Volume")),
         })
     
     return results
@@ -50,7 +67,10 @@ def main():
     errors = 0
 
     try:
-        for idx in INDICES:
+        idx_rows = session.query(MarketIndex).filter(MarketIndex.is_active == True).all()
+        indices = [{"symbol": r.symbol, "name": r.name} for r in idx_rows] if idx_rows else FALLBACK_INDICES
+
+        for idx in indices:
             symbol = idx["symbol"]
             name = idx["name"]
             

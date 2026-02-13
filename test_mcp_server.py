@@ -18,7 +18,11 @@ from mcp_server import (
     get_stock_screener, get_top_gainers, get_top_losers,
     get_top_dividend_payers, get_technical_signals,
     list_jobs, get_job_logs, trigger_job, toggle_job, get_job_status,
-    get_option_screener, get_option_chain_snapshot, run_pipeline_health_check
+    get_option_screener, get_option_chain_snapshot, run_pipeline_health_check,
+    get_wheel_put_candidates, get_wheel_put_annualized_return, get_wheel_contract_capacity,
+    analyze_wheel_put_risk, get_wheel_assignment_plan, get_wheel_covered_call_candidates,
+    compare_wheel_premiums, evaluate_wheel_iv, simulate_wheel_drawdown,
+    compare_wheel_start_timing, build_wheel_multi_stock_plan, stress_test_wheel_portfolio
 )
 from services.market_service import MarketService
 from services.account_service import AccountService
@@ -28,6 +32,7 @@ from services.yahoo_service import YahooService
 from services.screener_service import ScreenerService
 from services.job_service import JobService
 from services.option_screener_service import OptionScreenerService
+from services.wheel_service import WheelService
 
 # Patch IB connection to always return True
 @pytest.fixture(autouse=True)
@@ -238,3 +243,77 @@ async def test_run_pipeline_health_check():
         mock.return_value = {"success": True, "status": "executed"}
         data = await run_pipeline_health_check()
         assert data["success"] is True
+
+
+# --- Wheel Strategy Tools ---
+
+@pytest.mark.asyncio
+async def test_get_wheel_put_candidates():
+    with patch.object(WheelService, 'select_put_for_wheel') as mock:
+        mock.return_value = {"success": True, "recommended": {"symbol": "NDA-SE.ST"}}
+        data = await get_wheel_put_candidates("Nordea")
+        assert data["success"] is True
+        assert "recommended" in data
+
+
+@pytest.mark.asyncio
+async def test_get_wheel_put_annualized_return():
+    with patch.object(WheelService, 'get_atm_put_annualized_return') as mock:
+        mock.return_value = {"success": True, "data": {"annualized_return_percent": 22.0}}
+        data = await get_wheel_put_annualized_return("SEB")
+        assert data["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_get_wheel_contract_capacity():
+    with patch.object(WheelService, 'get_wheel_contract_capacity') as mock:
+        mock.return_value = {"success": True, "data": {"max_contracts": 3}}
+        data = await get_wheel_contract_capacity("Swedbank", 200000)
+        assert data["success"] is True
+        assert data["data"]["max_contracts"] == 3
+
+
+@pytest.mark.asyncio
+async def test_get_wheel_assignment_plan():
+    with patch.object(WheelService, 'evaluate_assignment') as mock:
+        mock.return_value = {"success": True, "data": {"next_step": "sell_covered_call"}}
+        data = await get_wheel_assignment_plan("Nordea", 150, 3.5)
+        assert data["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_compare_wheel_premiums():
+    with patch.object(WheelService, 'compare_wheel_put_premiums') as mock:
+        mock.return_value = {"success": True, "data": {"winner_by_yield": "Nordea"}}
+        data = await compare_wheel_premiums("Nordea", "Swedbank")
+        assert data["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_evaluate_wheel_iv():
+    with patch.object(WheelService, 'evaluate_iv_regime_for_wheel') as mock:
+        mock.return_value = {"success": True, "data": {"iv_percentile": 78.0}}
+        data = await evaluate_wheel_iv("Volvo")
+        assert data["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_wheel_meta_tools():
+    with patch.object(WheelService, 'simulate_wheel_drawdown') as draw_mock, \
+         patch.object(WheelService, 'compare_wheel_start_now_vs_wait') as timing_mock, \
+         patch.object(WheelService, 'build_multi_stock_wheel_plan') as multi_mock, \
+         patch.object(WheelService, 'stress_test_wheel_portfolio') as stress_mock:
+        draw_mock.return_value = {"success": True}
+        timing_mock.return_value = {"success": True}
+        multi_mock.return_value = {"success": True}
+        stress_mock.return_value = {"success": True}
+
+        draw = await simulate_wheel_drawdown("SEB", 120, 2.0)
+        timing = await compare_wheel_start_timing("Nordea")
+        multi = await build_wheel_multi_stock_plan(200000, ["Nordea", "SEB", "Swedbank"])
+        stress = await stress_test_wheel_portfolio(200000, 20, ["Nordea", "SEB", "Swedbank"])
+
+        assert draw["success"] is True
+        assert timing["success"] is True
+        assert multi["success"] is True
+        assert stress["success"] is True

@@ -11,6 +11,16 @@ from dataloader.models import Stock, OptionMetric
 logger = logging.getLogger(__name__)
 
 class OptionScreenerService:
+    @staticmethod
+    def _normalize_right(right: str = None):
+        if not right:
+            return None
+        r = right.upper()
+        if r in {"C", "CALL"}:
+            return "CALL"
+        if r in {"P", "PUT"}:
+            return "PUT"
+        return None
 
     @staticmethod
     def get_option_screener(symbol: str = None, expiry: str = None, 
@@ -23,19 +33,28 @@ class OptionScreenerService:
         """
         session = SessionLocal()
         try:
+            limit = max(1, min(int(limit), 200))
             query = session.query(OptionMetric, Stock).join(
                 Stock, Stock.id == OptionMetric.stock_id
             )
 
             if symbol:
-                query = query.filter(Stock.symbol.ilike(f"%{symbol}%"))
+                sym = symbol.upper().strip()
+                query = query.filter(
+                    (Stock.symbol == sym) |
+                    (Stock.symbol.ilike(f"{sym}.%")) |
+                    (Stock.symbol.ilike(f"%{sym}%"))
+                )
             
             if expiry:
                 expiry_date = datetime.strptime(expiry, '%Y-%m-%d').date()
                 query = query.filter(OptionMetric.expiry == expiry_date)
             
             if right:
-                query = query.filter(OptionMetric.right == right.upper())
+                norm_right = OptionScreenerService._normalize_right(right)
+                if not norm_right:
+                    return {"success": False, "error": "Invalid right. Use CALL/PUT or C/P"}
+                query = query.filter(OptionMetric.right == norm_right)
             
             if min_delta is not None:
                 query = query.filter(OptionMetric.delta >= min_delta)
@@ -82,7 +101,25 @@ class OptionScreenerService:
                     "updated_at": str(metric.updated_at)
                 })
 
-            return {"success": True, "data": data, "count": len(data)}
+            latest_update = max((m.updated_at for m, _ in results if m.updated_at), default=None)
+            return {
+                "success": True,
+                "data": data,
+                "count": len(data),
+                "as_of_datetime": latest_update.isoformat() if latest_update else None,
+                "criteria": {
+                    "symbol": symbol,
+                    "expiry": expiry,
+                    "right": OptionScreenerService._normalize_right(right) if right else None,
+                    "min_delta": min_delta,
+                    "max_delta": max_delta,
+                    "min_iv": min_iv,
+                    "max_iv": max_iv,
+                    "has_liquidity": has_liquidity,
+                    "limit": limit,
+                },
+                "empty_reason": None if data else "no_option_metrics_for_criteria",
+            }
 
         except Exception as e:
             logger.error(f"Option Screener error: {e}")
@@ -126,7 +163,9 @@ class OptionScreenerService:
                 "success": True, 
                 "symbol": stock.symbol,
                 "data": data, 
-                "count": len(data)
+                "count": len(data),
+                "as_of_datetime": max((m.updated_at for m in results if m.updated_at), default=None).isoformat() if results else None,
+                "empty_reason": None if data else "no_cached_option_chain_for_symbol",
             }
             
         except Exception as e:

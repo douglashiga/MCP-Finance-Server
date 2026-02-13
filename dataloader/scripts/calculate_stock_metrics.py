@@ -88,12 +88,25 @@ def calculate_metrics_for_stock(session, stock_id, today):
     if len(historical) < 30:  # Need minimum data
         return None
     
+    # Keep only valid rows to avoid NaN poisoning.
+    cleaned = []
+    for h in historical:
+        if h.close is None or not np.isfinite(h.close) or h.close <= 0:
+            continue
+        open_high = h.high if h.high is not None and np.isfinite(h.high) else h.close
+        open_low = h.low if h.low is not None and np.isfinite(h.low) else h.close
+        vol = h.volume if h.volume is not None and np.isfinite(h.volume) else 0.0
+        cleaned.append((h.date, float(h.close), float(open_high), float(open_low), float(vol)))
+
+    if len(cleaned) < 30:
+        return None
+
     # Convert to arrays
-    dates = [h.date for h in historical]
-    closes = np.array([h.close for h in historical])
-    highs = np.array([h.high for h in historical])
-    lows = np.array([h.low for h in historical])
-    volumes = np.array([h.volume for h in historical])
+    dates = [x[0] for x in cleaned]
+    closes = np.array([x[1] for x in cleaned], dtype=float)
+    highs = np.array([x[2] for x in cleaned], dtype=float)
+    lows = np.array([x[3] for x in cleaned], dtype=float)
+    volumes = np.array([x[4] for x in cleaned], dtype=float)
     
     # Current price
     current_price = closes[-1]
@@ -157,7 +170,7 @@ def calculate_metrics_for_stock(session, stock_id, today):
         metrics['distance_52w_high'] = ((current_price /metrics['high_52w']) - 1) * 100
         metrics['distance_52w_low'] = ((current_price / metrics['low_52w']) - 1) * 100
     
-    return metrics
+    return metrics, dates[-1]
 
 
 def ensure_python_types(metrics):
@@ -198,10 +211,12 @@ def main():
         
         for stock in stocks:
             try:
-                metrics = calculate_metrics_for_stock(session, stock.id, today)
+                result = calculate_metrics_for_stock(session, stock.id, today)
                 
-                if not metrics:
+                if not result:
                     continue
+
+                metrics, metrics_date = result
                 
                 # Sanitize for PostgreSQL compatibility
                 metrics = ensure_python_types(metrics)
@@ -209,7 +224,7 @@ def main():
                 # Upsert metrics
                 existing = session.query(StockMetrics).filter_by(
                     stock_id=stock.id,
-                    date=today
+                    date=metrics_date
                 ).first()
                 
                 if existing:
@@ -221,7 +236,7 @@ def main():
                     # Insert
                     new_metric = StockMetrics(
                         stock_id=stock.id,
-                        date=today,
+                        date=metrics_date,
                         **metrics
                     )
                     session.add(new_metric)

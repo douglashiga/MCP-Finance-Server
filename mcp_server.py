@@ -22,6 +22,8 @@ from services.yahoo_service import YahooService
 from services.screener_service import ScreenerService
 from services.job_service import JobService
 from services.option_screener_service import OptionScreenerService
+from services.classification_service import ClassificationService
+from services.wheel_service import WheelService
 
 # Local DB imports
 from dataloader.database import SessionLocal
@@ -424,6 +426,56 @@ async def get_fundamental_rankings(market: str = "sweden", metric: str = "market
 
 
 # ============================================================================
+# Classification & Company Profile Tools
+# ============================================================================
+
+@mcp.tool()
+async def get_companies_by_sector(market: str = "sweden", sector: str = None, industry: str = None,
+                                  subindustry: str = None, limit: int = 50) -> Dict[str, Any]:
+    """
+    List companies by normalized sector/industry/subindustry.
+
+    Parameters:
+        market: 'brazil', 'sweden', 'usa', 'all'
+        sector: Optional sector name filter (e.g. 'Financials')
+        industry: Optional industry filter (e.g. 'Banking')
+        subindustry: Optional subindustry filter
+        limit: Max rows (default 50)
+    """
+    return ClassificationService.get_companies_by_sector(
+        market=market, sector=sector, industry=industry, subindustry=subindustry, limit=limit
+    )
+
+
+@mcp.tool()
+async def get_company_core_business(symbol: str) -> Dict[str, Any]:
+    """
+    Return enriched company profile with 'core business' summary.
+
+    Parameters:
+        symbol: Ticker symbol, e.g. 'VOLV-B.ST', 'AAPL', 'PETR4.SA'
+    """
+    return ClassificationService.get_company_core_business(symbol)
+
+
+@mcp.tool()
+async def get_earnings_events(symbol: str = None, market: str = "sweden",
+                              upcoming_only: bool = False, limit: int = 20) -> Dict[str, Any]:
+    """
+    Get curated earnings events from normalized earnings pipeline.
+
+    Parameters:
+        symbol: Optional symbol filter
+        market: 'brazil', 'sweden', 'usa', 'all'
+        upcoming_only: If true, only upcoming events
+        limit: Max rows (default 20)
+    """
+    return ClassificationService.get_earnings_events(
+        symbol=symbol, market=market, upcoming_only=upcoming_only, limit=limit
+    )
+
+
+# ============================================================================
 # Option Screener Tools
 # ============================================================================
 
@@ -466,6 +518,229 @@ async def get_option_chain_snapshot(symbol: str, expiry: str = None) -> Dict[str
         expiry: Optional expiry date (YYYY-MM-DD)
     """
     return OptionScreenerService.get_option_chain_snapshot(symbol, expiry)
+
+
+# ============================================================================
+# Wheel Strategy Tools (Sweden-first defaults)
+# ============================================================================
+
+@mcp.tool()
+async def get_wheel_put_candidates(symbol: str, market: str = "sweden",
+                                   delta_min: float = 0.25, delta_max: float = 0.35,
+                                   dte_min: int = 4, dte_max: int = 10,
+                                   limit: int = 5, require_liquidity: bool = True) -> Dict[str, Any]:
+    """
+    Select candidate PUTs to start the Wheel strategy.
+
+    Parameters:
+        symbol: Underlying symbol or company name (e.g. 'Nordea', 'NDA-SE.ST')
+        market: Default 'sweden'
+        delta_min/delta_max: Typical Wheel range 0.25-0.35
+        dte_min/dte_max: Near-term expiry window (default weekly range)
+        limit: Max candidates
+        require_liquidity: Require positive bid+ask
+    """
+    return WheelService.select_put_for_wheel(
+        symbol=symbol, market=market, delta_min=delta_min, delta_max=delta_max,
+        dte_min=dte_min, dte_max=dte_max, limit=limit, require_liquidity=require_liquidity
+    )
+
+
+@mcp.tool()
+async def get_wheel_put_annualized_return(symbol: str, market: str = "sweden",
+                                          target_dte: int = 7) -> Dict[str, Any]:
+    """
+    Compute annualized return for an ATM PUT candidate.
+
+    Formula:
+    - period_return_% = premium / strike
+    - annualized_% = period_return_% * (365 / DTE)
+    """
+    return WheelService.get_atm_put_annualized_return(
+        symbol=symbol, market=market, target_dte=target_dte
+    )
+
+
+@mcp.tool()
+async def get_wheel_contract_capacity(symbol: str, capital_sek: float, market: str = "sweden",
+                                      strike: float = None, margin_requirement_pct: float = 1.0,
+                                      cash_buffer_pct: float = 0.0, target_dte: int = 7) -> Dict[str, Any]:
+    """
+    Estimate how many Wheel PUT contracts can be sold with available capital.
+
+    Formula:
+    contracts = floor((capital * (1-cash_buffer_pct)) / (strike * 100 * margin_requirement_pct))
+    """
+    return WheelService.get_wheel_contract_capacity(
+        symbol=symbol,
+        capital_sek=capital_sek,
+        market=market,
+        strike=strike,
+        margin_requirement_pct=margin_requirement_pct,
+        cash_buffer_pct=cash_buffer_pct,
+        target_dte=target_dte,
+    )
+
+
+@mcp.tool()
+async def analyze_wheel_put_risk(symbol: str, market: str = "sweden",
+                                 pct_below_spot: float = 5.0, target_dte: int = 7) -> Dict[str, Any]:
+    """
+    Analyze risk for selling a PUT below spot.
+    Includes delta-based assignment probability proxy, break-even, and exposure.
+    """
+    return WheelService.analyze_put_risk(
+        symbol=symbol, market=market, pct_below_spot=pct_below_spot, target_dte=target_dte
+    )
+
+
+@mcp.tool()
+async def get_wheel_assignment_plan(symbol: str, assignment_strike: float, premium_received: float,
+                                    market: str = "sweden") -> Dict[str, Any]:
+    """
+    Evaluate assignment scenario and next Wheel step.
+    Returns net cost basis and covered-call continuation plan.
+    """
+    return WheelService.evaluate_assignment(
+        symbol=symbol,
+        assignment_strike=assignment_strike,
+        premium_received=premium_received,
+        market=market,
+    )
+
+
+@mcp.tool()
+async def get_wheel_covered_call_candidates(symbol: str, average_cost: float, market: str = "sweden",
+                                            delta_min: float = 0.25, delta_max: float = 0.35,
+                                            dte_min: int = 4, dte_max: int = 21,
+                                            min_upside_pct: float = 1.0, limit: int = 5) -> Dict[str, Any]:
+    """
+    Suggest covered CALLs after assignment to continue the Wheel.
+    Filters strike above average cost and target delta window.
+    """
+    return WheelService.suggest_covered_call_after_assignment(
+        symbol=symbol,
+        average_cost=average_cost,
+        market=market,
+        delta_min=delta_min,
+        delta_max=delta_max,
+        dte_min=dte_min,
+        dte_max=dte_max,
+        min_upside_pct=min_upside_pct,
+        limit=limit,
+    )
+
+
+@mcp.tool()
+async def compare_wheel_premiums(symbol_a: str, symbol_b: str, market: str = "sweden",
+                                 delta_min: float = 0.25, delta_max: float = 0.35,
+                                 dte_min: int = 4, dte_max: int = 10) -> Dict[str, Any]:
+    """
+    Compare Wheel PUT premiums between two symbols normalized by capital usage.
+    """
+    return WheelService.compare_wheel_put_premiums(
+        symbol_a=symbol_a,
+        symbol_b=symbol_b,
+        market=market,
+        delta_min=delta_min,
+        delta_max=delta_max,
+        dte_min=dte_min,
+        dte_max=dte_max,
+    )
+
+
+@mcp.tool()
+async def evaluate_wheel_iv(symbol: str, market: str = "sweden", lookback_days: int = 90,
+                            high_iv_threshold_percentile: float = 70.0, target_dte: int = 7) -> Dict[str, Any]:
+    """
+    Evaluate if current IV is rich enough to justify starting Wheel.
+    Uses historical IV snapshots from local DB (does not infer missing history).
+    """
+    return WheelService.evaluate_iv_regime_for_wheel(
+        symbol=symbol,
+        market=market,
+        lookback_days=lookback_days,
+        high_iv_threshold_percentile=high_iv_threshold_percentile,
+        target_dte=target_dte,
+    )
+
+
+@mcp.tool()
+async def simulate_wheel_drawdown(symbol: str, strike: float, premium_received: float,
+                                  drop_percent: float = 10.0, market: str = "sweden") -> Dict[str, Any]:
+    """
+    Simulate drawdown scenario after selling a PUT if underlying drops by X%.
+    """
+    return WheelService.simulate_wheel_drawdown(
+        symbol=symbol,
+        strike=strike,
+        premium_received=premium_received,
+        drop_percent=drop_percent,
+        market=market,
+    )
+
+
+@mcp.tool()
+async def compare_wheel_start_timing(symbol: str, market: str = "sweden",
+                                     wait_drop_percent: float = 3.0,
+                                     delta_min: float = 0.25, delta_max: float = 0.35,
+                                     dte_min: int = 4, dte_max: int = 10) -> Dict[str, Any]:
+    """
+    Scenario comparison: start Wheel now vs wait for a pullback.
+    Returns a no-forecast, uncertainty-aware comparison.
+    """
+    return WheelService.compare_wheel_start_now_vs_wait(
+        symbol=symbol,
+        market=market,
+        wait_drop_percent=wait_drop_percent,
+        delta_min=delta_min,
+        delta_max=delta_max,
+        dte_min=dte_min,
+        dte_max=dte_max,
+    )
+
+
+@mcp.tool()
+async def build_wheel_multi_stock_plan(capital_sek: float, symbols: List[str] = None,
+                                       market: str = "sweden",
+                                       delta_min: float = 0.25, delta_max: float = 0.35,
+                                       dte_min: int = 4, dte_max: int = 10,
+                                       margin_requirement_pct: float = 1.0,
+                                       cash_buffer_pct: float = 0.10) -> Dict[str, Any]:
+    """
+    Build a multi-stock Wheel plan (capital split) for Swedish names by default.
+    """
+    return WheelService.build_multi_stock_wheel_plan(
+        capital_sek=capital_sek,
+        symbols=symbols,
+        market=market,
+        delta_min=delta_min,
+        delta_max=delta_max,
+        dte_min=dte_min,
+        dte_max=dte_max,
+        margin_requirement_pct=margin_requirement_pct,
+        cash_buffer_pct=cash_buffer_pct,
+    )
+
+
+@mcp.tool()
+async def stress_test_wheel_portfolio(capital_sek: float, sector_drop_percent: float = 20.0,
+                                      symbols: List[str] = None, market: str = "sweden",
+                                      delta_min: float = 0.25, delta_max: float = 0.35,
+                                      dte_min: int = 4, dte_max: int = 10) -> Dict[str, Any]:
+    """
+    Stress-test Wheel portfolio under a sector-wide drop scenario.
+    """
+    return WheelService.stress_test_wheel_portfolio(
+        capital_sek=capital_sek,
+        sector_drop_percent=sector_drop_percent,
+        symbols=symbols,
+        market=market,
+        delta_min=delta_min,
+        delta_max=delta_max,
+        dte_min=dte_min,
+        dte_max=dte_max,
+    )
 
 
 # ============================================================================

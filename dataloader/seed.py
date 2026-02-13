@@ -9,7 +9,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dataloader.database import init_db, SessionLocal
-from dataloader.models import Job
+from dataloader.models import Job, StockMetrics, MarketMover
 
 
 # Pre-configured jobs (ELT Architecture)
@@ -40,6 +40,14 @@ DEFAULT_JOBS = [
         "affected_tables": "raw_ibkr_prices",
     },
     {
+        "name": "Extract IBKR Instruments",
+        "description": "Fetches raw IBKR contract details and option sec-def params",
+        "script_path": "extract_ibkr_instruments.py",
+        "cron_expression": "15 */6 * * *",  # Every 6 hours
+        "timeout_seconds": 900,
+        "affected_tables": "raw_ibkr_contracts,raw_ibkr_option_params",
+    },
+    {
         "name": "Extract Option Metrics - B3",
         "description": "Fetches option chains, Greeks, and bid/ask for B3 market (5 weeks range)",
         "script_path": "extract_option_metrics.py --market B3",
@@ -62,6 +70,14 @@ DEFAULT_JOBS = [
         "cron_expression": "0 * * * *",  # Hourly
         "timeout_seconds": 600,
         "affected_tables": "option_metrics",
+    },
+    {
+        "name": "Snapshot Option IV",
+        "description": "Builds daily IV snapshots (ATM/percentiles) from option_metrics",
+        "script_path": "snapshot_option_iv.py",
+        "cron_expression": "10 */2 * * *",  # Every 2 hours after options loaders
+        "timeout_seconds": 300,
+        "affected_tables": "option_iv_snapshots",
     },
     
     # ===== TRANSFORMERS (Normalize raw data into domain tables) =====
@@ -89,6 +105,22 @@ DEFAULT_JOBS = [
         "timeout_seconds": 300,
         "affected_tables": "fundamentals",
     },
+    {
+        "name": "Normalize Classifications",
+        "description": "Normalizes sector/industry/subindustry from IBKR+Yahoo into canonical taxonomy",
+        "script_path": "normalize_classifications.py",
+        "cron_expression": "45 6 * * *",  # Daily after fundamentals
+        "timeout_seconds": 300,
+        "affected_tables": "sector_taxonomy,industry_taxonomy,subindustry_taxonomy,stock_classification_snapshots",
+    },
+    {
+        "name": "Enrich Company Profiles",
+        "description": "Builds company profile and core business text from raw fundamentals",
+        "script_path": "enrich_company_profiles.py",
+        "cron_expression": "50 6 * * *",  # Daily
+        "timeout_seconds": 300,
+        "affected_tables": "company_profiles",
+    },
     
     # ===== LEGACY LOADERS (Keep for historical/dividend data) =====
     {
@@ -97,6 +129,14 @@ DEFAULT_JOBS = [
         "script_path": "load_stock_list.py",
         "cron_expression": "0 5 * * 0",  # Weekly on Sunday at 5 AM
         "timeout_seconds": 120,
+    },
+    {
+        "name": "Reference Data Loader",
+        "description": "Upserts normalized exchange and market index reference tables",
+        "script_path": "load_reference_data.py",
+        "cron_expression": "30 4 * * 0",  # Weekly on Sunday at 4:30 AM
+        "timeout_seconds": 120,
+        "affected_tables": "exchanges,market_indices",
     },
     {
         "name": "Dividends Loader",
@@ -111,6 +151,14 @@ DEFAULT_JOBS = [
         "script_path": "load_earnings.py --years 1",
         "cron_expression": "0 8 * * 1-5",  # Weekdays at 8 AM
         "timeout_seconds": 600,
+    },
+    {
+        "name": "Curate Earnings Events",
+        "description": "Deduplicates raw earnings events and syncs curated/legacy earnings tables",
+        "script_path": "curate_earnings_events.py",
+        "cron_expression": "15 8 * * 1-5",  # After earnings loader
+        "timeout_seconds": 300,
+        "affected_tables": "raw_earnings_events,earnings_events,historical_earnings,earnings_calendar",
     },
     {
         "name": "Historical Prices Loader",
@@ -181,7 +229,9 @@ def main():
     
     # 3. Run stock list loader to seed initial data
     print("\n[3/3] Loading initial stock list...")
+    from dataloader.scripts.load_reference_data import main as load_reference_data
     from dataloader.scripts.load_stock_list import main as load_stocks
+    load_reference_data()
     load_stocks()
     
     # 4. Trigger initial data loading (Warm Start)
@@ -192,6 +242,9 @@ def main():
         from dataloader.scripts.load_historical_prices import main as load_historical
         from dataloader.scripts.calculate_stock_metrics import main as calculate_metrics
         from dataloader.scripts.update_market_movers import main as update_movers
+        from dataloader.scripts.normalize_classifications import main as normalize_classifications
+        from dataloader.scripts.enrich_company_profiles import main as enrich_company_profiles
+        from dataloader.scripts.curate_earnings_events import main as curate_earnings_events
         
         print("  → Fetching current prices...")
         extract_prices()
@@ -207,10 +260,31 @@ def main():
         print("  → Fetching earnings & calendar (10-year initial load)...")
         from dataloader.scripts.load_earnings import main as load_earnings
         load_earnings(years=10)
+        curate_earnings_events()
+
+        print("  → Normalizing sectors/industries and enriching company profiles...")
+        normalize_classifications()
+        enrich_company_profiles()
         
         print("  → Calculating technical metrics & movers...")
         calculate_metrics()
         update_movers()
+
+        # Validate screener baseline
+        verify_session = SessionLocal()
+        try:
+            metrics_count = verify_session.query(StockMetrics).count()
+            movers_count = verify_session.query(MarketMover).count()
+        finally:
+            verify_session.close()
+
+        if metrics_count == 0 or movers_count == 0:
+            print("  ⚠️  Screener baseline is empty after warm-up. Running fallback load...")
+            print("  → Fetching historical pricing (1-year fallback)...")
+            load_historical(period="1y")
+            print("  → Recalculating metrics and market movers...")
+            calculate_metrics()
+            update_movers()
         
         print("  ✓ Initial data and metrics loaded")
     except Exception as e:
