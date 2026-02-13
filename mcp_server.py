@@ -285,7 +285,7 @@ async def yahoo_search(query: str) -> Dict[str, Any]:
 # ============================================================================
 
 @mcp.tool()
-async def get_stock_screener(market: str = "all", sector: str = None,
+async def get_stock_screener(market: str = "sweden", sector: str = None,
                              sort_by: str = "perf_1d", limit: int = 50) -> Dict[str, Any]:
     """
     Stock screener with filters and technical indicators.
@@ -303,7 +303,7 @@ async def get_stock_screener(market: str = "all", sector: str = None,
 
 
 @mcp.tool()
-async def get_top_gainers(market: str = "all", period: str = "1D", limit: int = 10) -> Dict[str, Any]:
+async def get_top_gainers(market: str = "sweden", period: str = "1D", limit: int = 10) -> Dict[str, Any]:
     """
     Get top performing stocks (biggest gains) by market and period.
 
@@ -318,7 +318,7 @@ async def get_top_gainers(market: str = "all", period: str = "1D", limit: int = 
 
 
 @mcp.tool()
-async def get_top_losers(market: str = "all", period: str = "1D", limit: int = 10) -> Dict[str, Any]:
+async def get_top_losers(market: str = "sweden", period: str = "1D", limit: int = 10) -> Dict[str, Any]:
     """
     Get worst performing stocks (biggest drops) by market and period.
 
@@ -333,7 +333,7 @@ async def get_top_losers(market: str = "all", period: str = "1D", limit: int = 1
 
 
 @mcp.tool()
-async def get_top_dividend_payers(market: str = "all", sector: str = None,
+async def get_top_dividend_payers(market: str = "sweden", sector: str = None,
                                   limit: int = 10) -> Dict[str, Any]:
     """
     Get stocks with highest dividend yields.
@@ -349,7 +349,8 @@ async def get_top_dividend_payers(market: str = "all", sector: str = None,
 
 
 @mcp.tool()
-async def get_technical_signals(market: str = "all", signal_type: str = "oversold") -> Dict[str, Any]:
+async def get_technical_signals(market: str = "sweden", signal_type: str = "oversold",
+                                limit: int = 20) -> Dict[str, Any]:
     """
     Find stocks with specific technical signals.
 
@@ -366,7 +367,60 @@ async def get_technical_signals(market: str = "all", signal_type: str = "oversol
 
     Example: get_technical_signals("brazil", "oversold")
     """
-    return ScreenerService.get_technical_signals(market, signal_type)
+    return ScreenerService.get_technical_signals(market, signal_type, limit)
+
+
+@mcp.tool()
+async def get_highest_rsi(market: str = "sweden", limit: int = 10) -> Dict[str, Any]:
+    """
+    Get stocks with highest RSI values for the latest available metrics date.
+
+    Parameters:
+        market: 'brazil', 'sweden', 'usa', 'all'
+        limit: Number of results (default 10)
+    """
+    return ScreenerService.get_rsi_leaders(market=market, direction="high", limit=limit)
+
+
+@mcp.tool()
+async def get_lowest_rsi(market: str = "sweden", limit: int = 10) -> Dict[str, Any]:
+    """
+    Get stocks with lowest RSI values for the latest available metrics date.
+
+    Parameters:
+        market: 'brazil', 'sweden', 'usa', 'all'
+        limit: Number of results (default 10)
+    """
+    return ScreenerService.get_rsi_leaders(market=market, direction="low", limit=limit)
+
+
+@mcp.tool()
+async def get_most_active_stocks(market: str = "sweden", period: str = "1D", limit: int = 10) -> Dict[str, Any]:
+    """
+    Get most active stocks by market mover cache.
+
+    Parameters:
+        market: 'brazil', 'sweden', 'usa', 'all'
+        period: '1D', '1W', '1M'
+        limit: Number of results (default 10)
+    """
+    return ScreenerService.get_top_movers(market, period, "most_active", limit)
+
+
+@mcp.tool()
+async def get_fundamental_rankings(market: str = "sweden", metric: str = "market_cap",
+                                   limit: int = 10, sector: str = None) -> Dict[str, Any]:
+    """
+    Rank stocks using latest fundamentals by metric.
+
+    Parameters:
+        market: 'brazil', 'sweden', 'usa', 'all'
+        metric: 'market_cap', 'trailing_pe', 'forward_pe', 'roe', 'net_margin',
+                'revenue', 'free_cash_flow', 'debt_to_equity'
+        limit: Number of results (default 10)
+        sector: Optional sector filter
+    """
+    return ScreenerService.get_fundamental_leaders(market=market, metric=metric, limit=limit, sector=sector)
 
 
 # ============================================================================

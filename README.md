@@ -125,6 +125,101 @@ The server exposes 32 specialized tools for LLM agents to interact with financia
 
 ---
 
+## 🤖 LLM Service Design Guidelines
+
+Use these rules when creating or updating MCP tools so other AI agents can reliably use this server.
+
+### 1. Prefer intent-specific tools over generic mega-tools
+
+- Keep a generic fallback tool (example: `get_stock_screener(...)`).
+- Add focused tools for common questions:
+- `get_highest_rsi(...)`
+- `get_lowest_rsi(...)`
+- `get_top_dividend_payers(...)`
+- `get_most_active_stocks(...)`
+- `get_fundamental_rankings(...)`
+
+### 2. Always define safe defaults
+
+- `market` default: `sweden`
+- `limit` default: `10`
+- `period` default: `1D`
+- `signal_type` default: `oversold`
+- Clamp `limit` to a safe max (example: `100`).
+
+### 3. Response contract must be stable
+
+Every tool response should keep this structure:
+
+```json
+{
+  "success": true,
+  "data": [],
+  "count": 0,
+  "market": "sweden",
+  "as_of_date": "YYYY-MM-DD",
+  "criteria": {},
+  "empty_reason": null
+}
+```
+
+- `criteria`: echo effective filters used by the service.
+- `empty_reason`: set when `data=[]` (example: `no_matches_for_criteria`), otherwise `null`.
+- Keep naming consistent: use `metric_name` + `metric_value` for ranked outputs.
+- Avoid changing/removing existing keys abruptly (backward compatibility for agents/prompts).
+
+### 4. Temporal robustness
+
+- Do not rely on `date.today()` for analytics snapshots.
+- Use latest available snapshot from DB (example: max `stock_metrics.date`).
+- Return `as_of_date` / `as_of_datetime` explicitly.
+
+### 5. Empty results are not errors
+
+- If no rows match, return:
+- `success: true`
+- `data: []`
+- `count: 0`
+- `empty_reason: <why>`
+- Reserve `success: false` for real execution/system failures.
+
+### 6. Keep data model unchanged; evolve via query layer
+
+- Do not break tables for UX improvements.
+- Improve agent usability by adding service methods/tools and better response envelopes.
+
+### 7. Security baseline for admin endpoints
+
+- Require API key for administrative HTTP endpoints (`X-API-Key`).
+- Do not use wildcard CORS in production.
+- Validate/sanitize uploaded script filenames and block path traversal.
+- Keep insecure mode only for local development (`DATALOADER_ALLOW_INSECURE=true`).
+
+### 8. Fundamentals ranking conventions
+
+Supported ranking metrics:
+- `market_cap`
+- `trailing_pe`
+- `forward_pe`
+- `roe`
+- `net_margin`
+- `revenue`
+- `free_cash_flow`
+- `debt_to_equity`
+
+Sorting guidance:
+- Lower-is-better metrics: `trailing_pe`, `forward_pe`, `debt_to_equity` (ascending).
+- Higher-is-better metrics: all others (descending).
+
+### 9. Agent-friendly examples
+
+- "Highest RSI today": `get_highest_rsi()`
+- "Top 5 dividend stocks in Sweden": `get_top_dividend_payers(market="sweden", limit=5)`
+- "Best ROE in Sweden": `get_fundamental_rankings(metric="roe", limit=10)`
+- "Lowest debt/equity in Sweden": `get_fundamental_rankings(metric="debt_to_equity", limit=10)`
+
+---
+
 ## 🏗 System Architecture (ELT)
 
 We use an **ELT (Extract, Load, Transform)** flow to ensure data is always fresh and queries are fast.
