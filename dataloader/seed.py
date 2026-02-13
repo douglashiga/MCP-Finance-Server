@@ -6,6 +6,7 @@ Run with: python -m dataloader.seed
 """
 import sys
 import os
+import argparse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dataloader.database import init_db, SessionLocal
@@ -203,6 +204,10 @@ DEFAULT_JOBS = [
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--warmup", action="store_true", help="Run heavy initial data warmup jobs")
+    args = parser.parse_args()
+
     print("=" * 60)
     print("  DataLoader — Seed Script")
     print("=" * 60)
@@ -212,18 +217,38 @@ def main():
     init_db()
     print("  ✓ Tables created")
     
-    # 2. Register jobs
+    # 2. Register or sync jobs
     print("\n[2/3] Registering data loader jobs...")
     session = SessionLocal()
     try:
+        created = 0
+        updated = 0
         for job_data in DEFAULT_JOBS:
             existing = session.query(Job).filter_by(name=job_data["name"]).first()
             if not existing:
                 session.add(Job(**job_data))
+                created += 1
                 print(f"  ✓ Registered: {job_data['name']} (cron: {job_data['cron_expression']})")
             else:
-                print(f"  → Already exists: {job_data['name']}")
+                changed = False
+                for field in ["description", "script_path", "cron_expression", "timeout_seconds", "affected_tables"]:
+                    new_value = job_data.get(field)
+                    if getattr(existing, field) != new_value:
+                        setattr(existing, field, new_value)
+                        changed = True
+
+                # Preserve operator choice for is_active; only set default when null.
+                if existing.is_active is None:
+                    existing.is_active = True
+                    changed = True
+
+                if changed:
+                    updated += 1
+                    print(f"  ↻ Synced: {job_data['name']}")
+                else:
+                    print(f"  → Unchanged: {job_data['name']}")
         session.commit()
+        print(f"  ✓ Jobs synced (created={created}, updated={updated})")
     finally:
         session.close()
     
@@ -235,60 +260,63 @@ def main():
     load_stocks()
     
     # 4. Trigger initial data loading (Warm Start)
-    print("\n[BONUS] Warming up database with initial data...")
-    try:
-        from dataloader.scripts.extract_yahoo_prices import main as extract_prices
-        from dataloader.scripts.transform_prices import main as transform_prices
-        from dataloader.scripts.load_historical_prices import main as load_historical
-        from dataloader.scripts.calculate_stock_metrics import main as calculate_metrics
-        from dataloader.scripts.update_market_movers import main as update_movers
-        from dataloader.scripts.normalize_classifications import main as normalize_classifications
-        from dataloader.scripts.enrich_company_profiles import main as enrich_company_profiles
-        from dataloader.scripts.curate_earnings_events import main as curate_earnings_events
-        
-        print("  → Fetching current prices...")
-        extract_prices()
-        transform_prices()
-        
-        print("  → Fetching historical pricing (5-year initial load)...")
-        load_historical(period="5y")
-        
-        print("  → Fetching dividends (5-year initial load)...")
-        from dataloader.scripts.load_dividends import main as load_divs
-        load_divs(years=5)
-        
-        print("  → Fetching earnings & calendar (10-year initial load)...")
-        from dataloader.scripts.load_earnings import main as load_earnings
-        load_earnings(years=10)
-        curate_earnings_events()
-
-        print("  → Normalizing sectors/industries and enriching company profiles...")
-        normalize_classifications()
-        enrich_company_profiles()
-        
-        print("  → Calculating technical metrics & movers...")
-        calculate_metrics()
-        update_movers()
-
-        # Validate screener baseline
-        verify_session = SessionLocal()
+    if not args.warmup:
+        print("\n[BONUS] Warmup skipped (use --warmup to run initial heavy loaders).")
+    else:
+        print("\n[BONUS] Warming up database with initial data...")
         try:
-            metrics_count = verify_session.query(StockMetrics).count()
-            movers_count = verify_session.query(MarketMover).count()
-        finally:
-            verify_session.close()
+            from dataloader.scripts.extract_yahoo_prices import main as extract_prices
+            from dataloader.scripts.transform_prices import main as transform_prices
+            from dataloader.scripts.load_historical_prices import main as load_historical
+            from dataloader.scripts.calculate_stock_metrics import main as calculate_metrics
+            from dataloader.scripts.update_market_movers import main as update_movers
+            from dataloader.scripts.normalize_classifications import main as normalize_classifications
+            from dataloader.scripts.enrich_company_profiles import main as enrich_company_profiles
+            from dataloader.scripts.curate_earnings_events import main as curate_earnings_events
 
-        if metrics_count == 0 or movers_count == 0:
-            print("  ⚠️  Screener baseline is empty after warm-up. Running fallback load...")
-            print("  → Fetching historical pricing (1-year fallback)...")
-            load_historical(period="1y")
-            print("  → Recalculating metrics and market movers...")
+            print("  → Fetching current prices...")
+            extract_prices()
+            transform_prices()
+
+            print("  → Fetching historical pricing (5-year initial load)...")
+            load_historical(period="5y")
+
+            print("  → Fetching dividends (5-year initial load)...")
+            from dataloader.scripts.load_dividends import main as load_divs
+            load_divs(years=5)
+
+            print("  → Fetching earnings & calendar (10-year initial load)...")
+            from dataloader.scripts.load_earnings import main as load_earnings
+            load_earnings(years=10)
+            curate_earnings_events()
+
+            print("  → Normalizing sectors/industries and enriching company profiles...")
+            normalize_classifications()
+            enrich_company_profiles()
+
+            print("  → Calculating technical metrics & movers...")
             calculate_metrics()
             update_movers()
-        
-        print("  ✓ Initial data and metrics loaded")
-    except Exception as e:
-        print(f"  ⚠️  Warm up partially failed: {e}")
+
+            # Validate screener baseline
+            verify_session = SessionLocal()
+            try:
+                metrics_count = verify_session.query(StockMetrics).count()
+                movers_count = verify_session.query(MarketMover).count()
+            finally:
+                verify_session.close()
+
+            if metrics_count == 0 or movers_count == 0:
+                print("  ⚠️  Screener baseline is empty after warm-up. Running fallback load...")
+                print("  → Fetching historical pricing (1-year fallback)...")
+                load_historical(period="1y")
+                print("  → Recalculating metrics and market movers...")
+                calculate_metrics()
+                update_movers()
+
+            print("  ✓ Initial data and metrics loaded")
+        except Exception as e:
+            print(f"  ⚠️  Warm up partially failed: {e}")
 
     print("\n" + "=" * 60)
     print("  ✓ Seed complete! Start the server with:")
