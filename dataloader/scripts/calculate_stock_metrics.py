@@ -74,6 +74,28 @@ def calculate_atr(highs, lows, closes, period=14):
     return np.mean(tr[-period:]) if len(tr) >= period else None
 
 
+def calculate_returns(prices, lookback_returns=30):
+    """
+    Robust return series using pct_change to avoid vector shape mismatches.
+    Returns up to `lookback_returns` most recent finite returns.
+    """
+    if prices is None or len(prices) < 2:
+        return np.array([], dtype=float)
+
+    series = pd.Series(prices, dtype="float64").replace([np.inf, -np.inf], np.nan).dropna()
+    if len(series) < 2:
+        return np.array([], dtype=float)
+
+    returns = series.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
+    if returns.empty:
+        return np.array([], dtype=float)
+
+    arr = returns.tail(lookback_returns).to_numpy(dtype=float)
+    if arr.ndim != 1:
+        arr = arr.reshape(-1)
+    return arr
+
+
 def calculate_metrics_for_stock(session, stock_id, today):
     """Calculate all metrics for a single stock."""
     # Get historical data (1 year)
@@ -153,10 +175,8 @@ def calculate_metrics_for_stock(session, stock_id, today):
     
     # Volatility (30-day std dev of returns)
     if len(closes) >= 30:
-        # Take up to 31 prices to get 30 returns, or whatever is available
-        window = closes[-31:] 
-        returns = np.diff(window) / window[:-1]
-        metrics['volatility_30d'] = np.std(returns) * 100  # as percentage
+        returns = calculate_returns(closes, lookback_returns=30)
+        metrics['volatility_30d'] = (np.std(returns) * 100) if len(returns) > 0 else None
     
     # ATR
     if len(highs) >= 15:
@@ -248,7 +268,7 @@ def main():
                     print(f"  Processed {count} stocks...")
                 
             except Exception as e:
-                print(f"  ⚠️  Failed for {stock.symbol}: {e}", file=sys.stderr)
+                print(f"  ⚠️  Failed for {stock.symbol}: {type(e).__name__}: {e}", file=sys.stderr)
                 continue
         
         session.commit()
