@@ -48,6 +48,104 @@ MCP_TRANSPORT = os.environ.get('MCP_TRANSPORT', 'sse')  # 'sse' for network, 'st
 
 mcp = FastMCP("mcp-finance", host=MCP_HOST, port=MCP_PORT)
 
+# LLM-friendly capability map for "what can you do?" queries.
+MARKET_CAPABILITIES = [
+    {
+        "category": "market_data",
+        "description": "Precos em tempo real, busca de ticker e historico OHLCV.",
+        "methods": ["get_stock_price", "get_historical_data", "search_symbol"],
+        "examples": [
+            "Qual o preco atual da Nordea?",
+            "Me traga 1 mes de candles diarios da SEB.",
+        ],
+    },
+    {
+        "category": "fundamentals",
+        "description": "Fundamentos, dividendos e perfil de empresa.",
+        "methods": ["get_fundamentals", "get_dividends", "get_company_info", "get_financial_statements"],
+        "examples": [
+            "Quais os fundamentos da VOLV-B.ST?",
+            "Quais acoes suecas pagam mais dividendos?",
+        ],
+    },
+    {
+        "category": "stock_screener",
+        "description": "Rankings por performance, RSI, sinais tecnicos e filtros por setor.",
+        "methods": [
+            "get_stock_screener", "get_top_gainers", "get_top_losers", "get_most_active_stocks",
+            "get_highest_rsi", "get_lowest_rsi", "get_top_dividend_payers", "get_fundamental_rankings",
+            "get_technical_signals", "get_companies_by_sector", "get_company_core_business",
+        ],
+        "examples": [
+            "Quais sao as maiores altas hoje na Suecia?",
+            "Top 5 acoes com maior RSI hoje.",
+        ],
+    },
+    {
+        "category": "options_and_greeks",
+        "description": "Option chain, greeks e screener de opcoes com filtros de delta/IV/liquidez.",
+        "methods": ["get_option_chain", "get_option_greeks", "get_option_screener", "get_option_chain_snapshot"],
+        "examples": [
+            "Mostre puts com delta entre 0.25 e 0.35 para Nordea.",
+            "Qual o delta/IV da call da SEB com vencimento mais proximo?",
+        ],
+    },
+    {
+        "category": "wheel_strategy",
+        "description": "Analises completas de Wheel: selecao de put/call, retorno, risco e stress tests.",
+        "methods": [
+            "get_wheel_put_candidates", "get_wheel_put_annualized_return", "get_wheel_contract_capacity",
+            "analyze_wheel_put_risk", "get_wheel_assignment_plan", "get_wheel_covered_call_candidates",
+            "compare_wheel_premiums", "evaluate_wheel_iv", "simulate_wheel_drawdown",
+            "compare_wheel_start_timing", "build_wheel_multi_stock_plan", "stress_test_wheel_portfolio",
+        ],
+        "examples": [
+            "Qual PUT vender esta semana em Nordea com risco moderado?",
+            "Com 200.000 SEK, quantos contratos de Swedbank posso vender?",
+        ],
+    },
+    {
+        "category": "event_calendar",
+        "description": "Calendario de eventos corporativos, macro, politica monetaria e estrutura de mercado.",
+        "methods": [
+            "get_event_calendar", "get_corporate_events", "get_macro_events",
+            "get_monetary_policy_events", "get_geopolitical_events",
+            "get_market_structure_events", "get_wheel_event_risk_window",
+        ],
+        "examples": [
+            "Quais eventos podem impactar Nordea nos proximos 14 dias?",
+            "Quais eventos macro na Suecia essa semana?",
+        ],
+    },
+    {
+        "category": "pipeline_and_jobs",
+        "description": "Observabilidade e controle dos jobs de carga/transformacao.",
+        "methods": ["list_jobs", "get_job_logs", "trigger_job", "toggle_job", "get_job_status", "run_pipeline_health_check"],
+        "examples": [
+            "Mostre status dos jobs do pipeline.",
+            "Dispare o job Calculate Stock Metrics agora.",
+        ],
+    },
+]
+
+
+@mcp.tool()
+async def get_market_capabilities() -> Dict[str, Any]:
+    """
+    Lista as capacidades do servidor financeiro por categoria, incluindo metodos e exemplos de perguntas.
+
+    Use este metodo quando o usuario perguntar:
+    - "que tipo de informacao voce pode prover?"
+    - "o que voce consegue fazer?"
+    - "quais metodos existem para mercado/opcoes/wheel?"
+    """
+    return {
+        "success": True,
+        "default_market": "sweden",
+        "categories": MARKET_CAPABILITIES,
+        "usage_hint": "Escolha uma categoria e use os methods sugeridos; para duvidas gerais, comece por stock_screener, wheel_strategy e event_calendar.",
+    }
+
 # ============================================================================
 # IBKR Tools (Real-time, Priority)
 # ============================================================================
@@ -1114,6 +1212,25 @@ Use Yahoo Finance format WITH dot suffixes for international stocks:
 
 ### When unsure:
 Use search_symbol("company name") to find the correct IB ticker.
+"""
+
+
+@mcp.prompt()
+def market_capabilities_guide() -> str:
+    """Guide with supported market information capabilities and example questions."""
+    return """## Market Capabilities Guide
+
+When the user asks "what information can you provide?", call `get_market_capabilities`.
+
+Recommended categories:
+- `stock_screener`: gainers/losers/RSI/dividend/fundamental rankings
+- `options_and_greeks`: chain, greeks, filtered option screeners
+- `wheel_strategy`: put selection, annualized return, risk, assignment, covered call
+- `event_calendar`: corporate + macro + central bank + market structure events
+- `pipeline_and_jobs`: monitor and trigger ingestion/analytics jobs
+
+Default analytics market is `sweden`.
+Prefer intent-specific methods instead of generic mega-queries.
 """
 
 

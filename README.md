@@ -50,6 +50,7 @@ Key normalized/curated tables used by MCP tools:
 - `sector_taxonomy`, `industry_taxonomy`, `subindustry_taxonomy`
 - `stock_classification_snapshots`, `company_profiles`
 - `raw_earnings_events`, `earnings_events`
+- `raw_market_events`, `market_events`
 
 ## MCP Tool Groups
 
@@ -115,6 +116,13 @@ Key normalized/curated tables used by MCP tools:
 - `get_market_structure_events(market='sweden', start_date=None, end_date=None, min_volatility_impact='low', limit=50)`
 - `get_wheel_event_risk_window(ticker, market='sweden', days_ahead=14, limit=100)`
 
+### Local Cached DB Tools
+
+- `get_earnings_history(symbol, limit=10)`
+- `get_earnings_calendar(symbol)`
+- `query_local_stocks(country=None, sector=None)`
+- `query_local_fundamentals(symbol)`
+
 ### Job and Pipeline Management
 
 - `list_jobs()`
@@ -123,6 +131,11 @@ Key normalized/curated tables used by MCP tools:
 - `toggle_job(job_name, active)`
 - `get_job_status()`
 - `run_pipeline_health_check()`
+
+### Capability Discovery
+
+- `get_market_capabilities()`
+  - Returns grouped capabilities (`methods` + `examples`) so an LLM can answer "what can you do?" with concrete actions.
 
 ## LLM Service Design Rules
 
@@ -202,6 +215,18 @@ Major jobs in `dataloader/seed.py` include:
 - Loaders: stock list, reference data, dividends, historical prices, index performance.
 - Validation: pipeline health check.
 
+Seed behavior (`python -m dataloader.seed`):
+- Idempotent sync of default jobs: missing jobs are created and existing jobs are updated (description/script/cron/timeout/tables) without duplicating rows.
+- `--warmup` is optional; heavy initial load only runs when explicitly requested.
+- Warmup now includes:
+  - historical prices (5y),
+  - dividends (5y),
+  - earnings (10y) + curation,
+  - classification normalization + company profile enrichment,
+  - stock metrics + market movers,
+  - normalized event calendar generation.
+- Built-in fallback: if screener baseline remains empty after warmup, it retries historical load + metrics/movers.
+
 ## Quick Start
 
 ### Docker
@@ -235,6 +260,18 @@ python -m dataloader.app
 - If Wheel IV analysis reports insufficient history, run option metrics jobs and `Snapshot Option IV` for multiple days.
 - If option greeks are sparse, ensure IB market data permissions and option subscriptions are active.
 - For macro/monetary/geopolitical events, maintain `dataloader/data/manual_events.json` and run `Load Event Calendar`.
+- To avoid duplicate manual runs, backend and frontend both protect against concurrent triggers for the same job:
+  - backend returns `"Job '<name>' is already running"` when an open run exists,
+  - frontend disables the run button while request is in flight.
+- Jobs UI uses in-app notifications/toasts and confirmation modal (no browser `alert()` flow).
+
+## Troubleshooting
+
+- Error during metrics seed like `operands could not be broadcast together with shapes (29,) (30,)`:
+  - fixed by using robust return series (`pct_change`) in volatility calculation instead of brittle array slicing.
+  - ensure you are on commit `4d0292f` or newer.
+- If seed fails due missing deps locally, install project dependencies first:
+  - `pip install -e .`
 
 ## License
 
