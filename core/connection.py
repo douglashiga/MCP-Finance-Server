@@ -66,26 +66,37 @@ class IBConnection:
         else:
             logger.error("[CONNECTION] Auto-reconnect failed")
 
-    async def connect(self):
-        """Connect to IB Gateway or TWS with Exponential Backoff."""
+    async def connect(self, client_id: Optional[int] = None):
+        """Connect to IB Gateway or TWS with Exponential Backoff and Client ID recovery."""
         if self.ib.isConnected():
             return
 
+        target_id = client_id or CLIENT_ID
         delay = BASE_DELAY
+        
         for i in range(MAX_RETRIES):
             try:
-                logger.info(f"[CONNECTION] Connecting to IB Gateway at {HOST}:{PORT} (Attempt {i+1}/{MAX_RETRIES})")
-                await self.ib.connectAsync(HOST, PORT, CLIENT_ID)
-                logger.info(f"[CONNECTION] Connected successfully")
+                logger.info(f"[CONNECTION] Connecting to IB Gateway at {HOST}:{PORT} (ID: {target_id}, Attempt {i+1}/{MAX_RETRIES})")
+                await self.ib.connectAsync(HOST, PORT, target_id)
+                logger.info(f"[CONNECTION] Connected successfully with ID {target_id}")
                 return
             except Exception as e:
-                logger.error(f"[CONNECTION] Connection failed: {e}")
+                error_msg = str(e) or "Timeout/Peer Closed"
+                logger.error(f"[CONNECTION] Connection failed (ID: {target_id}): {error_msg}")
+                
+                # Proactively switch ID on any failure to avoid hidden conflicts
+                import random
+                old_id = target_id
+                target_id = random.randint(10, 999)
+                logger.info(f"[CONNECTION] Switching from ID {old_id} to {target_id} for next attempt.")
+                
                 if i < MAX_RETRIES - 1:
                     logger.info(f"[CONNECTION] Retrying in {delay} seconds...")
                     await asyncio.sleep(delay)
                     delay *= 2
                 else:
                     logger.critical("[CONNECTION] Max retries reached. Could not connect.")
+                    raise ConnectionError(f"Failed to connect to IB Gateway after {MAX_RETRIES} attempts.")
 
     def is_connected(self) -> bool:
         return self.ib.isConnected()

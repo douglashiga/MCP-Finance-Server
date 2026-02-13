@@ -140,7 +140,9 @@ def calculate_metrics_for_stock(session, stock_id, today):
     
     # Volatility (30-day std dev of returns)
     if len(closes) >= 30:
-        returns = np.diff(closes[-30:]) / closes[-31:-1]
+        # Take up to 31 prices to get 30 returns, or whatever is available
+        window = closes[-31:] 
+        returns = np.diff(window) / window[:-1]
         metrics['volatility_30d'] = np.std(returns) * 100  # as percentage
     
     # ATR
@@ -156,6 +158,31 @@ def calculate_metrics_for_stock(session, stock_id, today):
         metrics['distance_52w_low'] = ((current_price / metrics['low_52w']) - 1) * 100
     
     return metrics
+
+
+def ensure_python_types(metrics):
+    """Convert numpy types to standard python types for database compatibility."""
+    result = {}
+    for k, v in metrics.items():
+        if v is None:
+            result[k] = None
+        elif isinstance(v, (np.floating, float)):
+            val = float(v)
+            if np.isnan(val) or np.isinf(val):
+                result[k] = None
+            else:
+                result[k] = val
+        elif isinstance(v, (np.integer, int)):
+            result[k] = int(v)
+        elif hasattr(v, 'item'): # Fallback for other numpy scalars
+            val = v.item()
+            if isinstance(val, float) and (np.isnan(val) or np.isinf(val)):
+                result[k] = None
+            else:
+                result[k] = val
+        else:
+            result[k] = v
+    return result
 
 
 def main():
@@ -175,6 +202,9 @@ def main():
                 
                 if not metrics:
                     continue
+                
+                # Sanitize for PostgreSQL compatibility
+                metrics = ensure_python_types(metrics)
                 
                 # Upsert metrics
                 existing = session.query(StockMetrics).filter_by(

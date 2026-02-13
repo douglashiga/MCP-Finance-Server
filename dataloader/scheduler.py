@@ -116,20 +116,25 @@ class JobScheduler:
         session.commit()
         run_id = run.id
 
-        # Resolve full script path
-        full_path = os.path.join(SCRIPTS_DIR, script_path)
-        if not os.path.isabs(script_path):
-            full_path = os.path.join(SCRIPTS_DIR, script_path)
-        else:
-            full_path = script_path
+        # Parse command and arguments
+        import shlex
+        parts = shlex.split(script_path)
+        script_file = parts[0]
+        script_args = parts[1:]
 
-        logger.info(f"[SCHEDULER] Executing job {job_id}: {full_path}")
+        # Resolve full script path
+        if not os.path.isabs(script_file):
+            full_path = os.path.join(SCRIPTS_DIR, script_file)
+        else:
+            full_path = script_file
+
+        logger.info(f"[SCHEDULER] Executing job {job_id}: {full_path} {' '.join(script_args)}")
 
         start_time = time.time()
         try:
             # Run the script as a subprocess
             process = await asyncio.create_subprocess_exec(
-                sys.executable, full_path,
+                sys.executable, full_path, *script_args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),  # Project root

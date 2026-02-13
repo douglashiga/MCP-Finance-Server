@@ -551,17 +551,28 @@ def get_stats(_auth: None = Depends(require_admin_api_key)):
 # Static Files — Serve UI
 # ============================================================================
 
-@app.get("/")
-async def serve_ui():
-    """Serve the main UI page."""
+# Assets mount point (React bundle)
+app.mount("/assets", StaticFiles(directory=os.path.join(STATIC_DIR, "assets")), name="assets")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.get("/{full_path:path}")
+async def serve_ui(full_path: str):
+    """Serve the React UI or fallback to index.html for SPA routing."""
+    # Catch-all for API to avoid serving index.html on missing endpoints
+    if full_path.startswith("api/"):
+        raise HTTPException(status_code=404, detail="API route not found")
+        
+    # Check if file exists in static dir
+    file_path = os.path.join(STATIC_DIR, full_path)
+    if os.path.isfile(file_path):
+        return FileResponse(file_path)
+        
+    # Default to index.html for SPA
     index_path = os.path.join(STATIC_DIR, "index.html")
     if os.path.isfile(index_path):
         return FileResponse(index_path)
     return HTMLResponse("<h1>DataLoader</h1><p>UI not found. Place index.html in dataloader/static/</p>")
-
-
-# Mount static files AFTER explicit routes
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 # ============================================================================
