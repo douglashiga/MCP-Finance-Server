@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import {
     Database,
     Search,
@@ -6,7 +6,7 @@ import {
     ChevronRight,
     Download,
     Filter,
-    RefreshCw
+    RefreshCw,
 } from 'lucide-react'
 
 const DataBrowser = () => {
@@ -15,61 +15,132 @@ const DataBrowser = () => {
     const [data, setData] = useState([])
     const [columns, setColumns] = useState([])
     const [pagination, setPagination] = useState({ page: 1, total: 0, pages: 1 })
-    const [search, setSearch] = useState('')
+    const [searchInput, setSearchInput] = useState('')
+    const [appliedSearch, setAppliedSearch] = useState('')
     const [loading, setLoading] = useState(false)
+    const [downloading, setDownloading] = useState(false)
+    const [notifications, setNotifications] = useState([])
 
-    // Fetch table list on mount
+    const parseError = async (res) => {
+        const payload = await res.json().catch(() => ({}))
+        return payload.detail || payload.error || `Request failed (${res.status})`
+    }
+
+    const notify = (type, message) => {
+        const id = `${Date.now()}-${Math.random()}`
+        setNotifications((prev) => [...prev, { id, type, message }])
+        setTimeout(() => {
+            setNotifications((prev) => prev.filter((n) => n.id !== id))
+        }, 3500)
+    }
+
     useEffect(() => {
         const fetchTables = async () => {
             try {
                 const res = await fetch('/api/schema')
-                const data = await res.json()
-                setTables(data.tables)
-                if (data.tables.length > 0) {
-                    setSelectedTable(data.tables[0].name)
+                if (!res.ok) {
+                    throw new Error(await parseError(res))
+                }
+                const payload = await res.json()
+                const list = payload.tables || []
+                setTables(list)
+                if (list.length > 0) {
+                    setSelectedTable(list[0].name)
                 }
             } catch (err) {
                 console.error('Failed to fetch tables', err)
+                notify('error', err.message || 'Falha ao carregar tabelas')
             }
         }
         fetchTables()
     }, [])
 
-    // Fetch data when table, page, or search changes
-    useEffect(() => {
-        if (selectedTable) {
-            fetchData()
-        }
-    }, [selectedTable, pagination.page])
+    const fetchData = async (tableName, page, search) => {
+        if (!tableName) return
 
-    const fetchData = async () => {
         setLoading(true)
         try {
-            let url = `/api/tables/${selectedTable}?page=${pagination.page}`
-            if (search) url += `&search=${encodeURIComponent(search)}`
+            const params = new URLSearchParams({
+                page: String(page),
+            })
+            if (search) {
+                params.set('search', search)
+            }
 
-            const res = await fetch(url)
+            const res = await fetch(`/api/tables/${tableName}?${params.toString()}`)
+            if (!res.ok) {
+                throw new Error(await parseError(res))
+            }
             const result = await res.json()
-
-            setData(result.data)
-            setColumns(result.columns)
-            setPagination(result.pagination)
+            setData(result.data || [])
+            setColumns(result.columns || [])
+            setPagination(result.pagination || { page: 1, total: 0, pages: 1 })
         } catch (err) {
             console.error('Failed to fetch table data', err)
+            notify('error', err.message || 'Falha ao carregar dados da tabela')
         } finally {
             setLoading(false)
         }
     }
 
+    useEffect(() => {
+        fetchData(selectedTable, pagination.page, appliedSearch)
+    }, [selectedTable, pagination.page, appliedSearch])
+
     const handleSearch = (e) => {
         e.preventDefault()
-        setPagination(p => ({ ...p, page: 1 }))
-        fetchData()
+        setPagination((p) => ({ ...p, page: 1 }))
+        setAppliedSearch(searchInput.trim())
     }
+
+    const handleRefresh = async () => {
+        await fetchData(selectedTable, pagination.page, appliedSearch)
+    }
+
+    const handleDownload = async () => {
+        if (!selectedTable || downloading) return
+
+        setDownloading(true)
+        try {
+            const params = new URLSearchParams()
+            if (appliedSearch) {
+                params.set('search', appliedSearch)
+            }
+
+            const suffix = params.toString() ? `?${params.toString()}` : ''
+            const res = await fetch(`/api/tables/${selectedTable}/export.csv${suffix}`)
+            if (!res.ok) {
+                throw new Error(await parseError(res))
+            }
+
+            const blob = await res.blob()
+            const objectUrl = window.URL.createObjectURL(blob)
+            const link = document.createElement('a')
+            const contentDisposition = res.headers.get('Content-Disposition')
+            const filename = parseFilename(contentDisposition) || `${selectedTable}.csv`
+            link.href = objectUrl
+            link.download = filename
+            document.body.appendChild(link)
+            link.click()
+            link.remove()
+            window.URL.revokeObjectURL(objectUrl)
+
+            notify('success', 'Download do CSV iniciado')
+        } catch (err) {
+            notify('error', err.message || 'Falha ao baixar CSV')
+        } finally {
+            setDownloading(false)
+        }
+    }
+
+    const hasRows = data.length > 0
+    const activeTableMeta = useMemo(
+        () => tables.find((t) => t.name === selectedTable),
+        [tables, selectedTable],
+    )
 
     return (
         <div style={styles.container}>
-            {/* Toolbar */}
             <div style={styles.toolbar}>
                 <div style={styles.selectorGroup}>
                     <Database size={18} color="var(--primary)" />
@@ -78,11 +149,12 @@ const DataBrowser = () => {
                         value={selectedTable}
                         onChange={(e) => {
                             setSelectedTable(e.target.value)
-                            setPagination(p => ({ ...p, page: 1 }))
-                            setSearch('')
+                            setPagination((p) => ({ ...p, page: 1 }))
+                            setSearchInput('')
+                            setAppliedSearch('')
                         }}
                     >
-                        {tables.map(t => (
+                        {tables.map((t) => (
                             <option key={t.name} value={t.name}>{t.name} ({t.row_count})</option>
                         ))}
                     </select>
@@ -95,31 +167,47 @@ const DataBrowser = () => {
                             type="text"
                             placeholder="Search in table..."
                             style={styles.searchInput}
-                            value={search}
-                            onChange={(e) => setSearch(e.target.value)}
+                            value={searchInput}
+                            onChange={(e) => setSearchInput(e.target.value)}
                         />
                     </div>
-                    <button type="submit" style={styles.actionBtn}><Filter size={16} /> Filter</button>
+                    <button type="submit" style={styles.actionBtn} disabled={loading || !selectedTable}>
+                        <Filter size={16} /> Filter
+                    </button>
                 </form>
 
                 <div style={styles.actions}>
-                    <button style={styles.actionBtn} onClick={fetchData} title="Refresh">
+                    <button style={styles.actionBtn} onClick={handleRefresh} disabled={loading || !selectedTable} title="Refresh">
                         <RefreshCw size={16} className={loading ? 'spin' : ''} />
                     </button>
-                    <button style={styles.actionBtn} title="Download CSV (Mock)">
-                        <Download size={16} />
+                    <button
+                        style={styles.actionBtn}
+                        title="Download CSV"
+                        onClick={handleDownload}
+                        disabled={downloading || !selectedTable}
+                    >
+                        <Download size={16} /> {downloading ? '...' : 'CSV'}
                     </button>
                 </div>
             </div>
 
-            {/* Grid */}
+            <div style={styles.metaBar}>
+                <span style={styles.metaText}>Tabela: <strong>{selectedTable || '-'}</strong></span>
+                <span style={styles.metaText}>Registros: <strong>{pagination.total}</strong></span>
+                <span style={styles.metaText}>Filtro: <strong>{appliedSearch || 'none'}</strong></span>
+                <span style={styles.metaText}>Rows visiveis: <strong>{data.length}</strong></span>
+                {activeTableMeta && (
+                    <span style={styles.metaText}>Schema count: <strong>{activeTableMeta.columns?.length || 0}</strong></span>
+                )}
+            </div>
+
             <div style={styles.gridWrapper}>
                 {loading && <div style={styles.loaderOverlay}>Loading data...</div>}
                 <div style={styles.tableScroll}>
                     <table style={styles.table}>
                         <thead>
                             <tr>
-                                {columns.map(col => (
+                                {columns.map((col) => (
                                     <th key={col} style={styles.th}>{col}</th>
                                 ))}
                             </tr>
@@ -127,16 +215,16 @@ const DataBrowser = () => {
                         <tbody>
                             {data.map((row, i) => (
                                 <tr key={i} style={styles.tr}>
-                                    {columns.map(col => (
+                                    {columns.map((col) => (
                                         <td key={col} style={styles.td}>
                                             {renderValue(row[col])}
                                         </td>
                                     ))}
                                 </tr>
                             ))}
-                            {data.length === 0 && !loading && (
+                            {!hasRows && !loading && (
                                 <tr>
-                                    <td colSpan={columns.length} style={styles.empty}>
+                                    <td colSpan={Math.max(columns.length, 1)} style={styles.empty}>
                                         No data found in this table.
                                     </td>
                                 </tr>
@@ -146,7 +234,6 @@ const DataBrowser = () => {
                 </div>
             </div>
 
-            {/* Pagination */}
             <div style={styles.pagination}>
                 <div style={styles.pageInfo}>
                     Showing {data.length} of {pagination.total} records
@@ -154,23 +241,45 @@ const DataBrowser = () => {
                 <div style={styles.pageControls}>
                     <button
                         style={styles.pageBtn}
-                        disabled={pagination.page <= 1}
-                        onClick={() => setPagination(p => ({ ...p, page: p.page - 1 }))}
+                        disabled={pagination.page <= 1 || loading}
+                        onClick={() => setPagination((p) => ({ ...p, page: p.page - 1 }))}
                     >
                         <ChevronLeft size={18} />
                     </button>
-                    <span style={styles.pageDisplay}>Page {pagination.page} of {pagination.pages}</span>
+                    <span style={styles.pageDisplay}>Page {pagination.page} of {Math.max(pagination.pages || 1, 1)}</span>
                     <button
                         style={styles.pageBtn}
-                        disabled={pagination.page >= pagination.pages}
-                        onClick={() => setPagination(p => ({ ...p, page: p.page + 1 }))}
+                        disabled={pagination.page >= (pagination.pages || 1) || loading}
+                        onClick={() => setPagination((p) => ({ ...p, page: p.page + 1 }))}
                     >
                         <ChevronRight size={18} />
                     </button>
                 </div>
             </div>
+
+            <div style={styles.toastContainer}>
+                {notifications.map((n) => (
+                    <div
+                        key={n.id}
+                        style={{
+                            ...styles.toast,
+                            ...(n.type === 'success' ? styles.toastSuccess : {}),
+                            ...(n.type === 'error' ? styles.toastError : {}),
+                            ...(n.type === 'info' ? styles.toastInfo : {}),
+                        }}
+                    >
+                        {n.message}
+                    </div>
+                ))}
+            </div>
         </div>
     )
+}
+
+const parseFilename = (contentDisposition) => {
+    if (!contentDisposition) return null
+    const match = contentDisposition.match(/filename="?([^";]+)"?/i)
+    return match?.[1] || null
 }
 
 const renderValue = (val) => {
@@ -185,12 +294,12 @@ const styles = {
         display: 'flex',
         flexDirection: 'column',
         gap: '1rem',
-        height: 'calc(100vh - 180px)', // Adjust based on header
+        height: 'calc(100vh - 180px)',
     },
     toolbar: {
         display: 'flex',
         alignItems: 'center',
-        gap: '1.5rem',
+        gap: '1rem',
         backgroundColor: 'var(--card)',
         padding: '0.75rem 1rem',
         borderRadius: 'var(--radius)',
@@ -200,7 +309,7 @@ const styles = {
         display: 'flex',
         alignItems: 'center',
         gap: '0.75rem',
-        minWidth: '200px',
+        minWidth: '260px',
     },
     select: {
         backgroundColor: 'var(--background)',
@@ -245,13 +354,26 @@ const styles = {
         cursor: 'pointer',
         display: 'flex',
         alignItems: 'center',
-        gap: '0.5rem',
+        gap: '0.45rem',
         fontSize: '0.85rem',
         fontWeight: '500',
     },
     actions: {
         display: 'flex',
         gap: '0.5rem',
+    },
+    metaBar: {
+        display: 'flex',
+        flexWrap: 'wrap',
+        gap: '0.65rem 1rem',
+        padding: '0.55rem 0.75rem',
+        border: '1px solid var(--border)',
+        borderRadius: 'var(--radius)',
+        backgroundColor: 'rgba(255,255,255,0.02)',
+    },
+    metaText: {
+        fontSize: '0.8rem',
+        color: 'var(--muted-foreground)',
     },
     gridWrapper: {
         flex: 1,
@@ -342,7 +464,34 @@ const styles = {
     pageDisplay: {
         fontSize: '0.9rem',
         fontWeight: '500',
-    }
+    },
+    toastContainer: {
+        position: 'fixed',
+        right: '1rem',
+        bottom: '1rem',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '0.5rem',
+        zIndex: 2000,
+    },
+    toast: {
+        minWidth: '260px',
+        padding: '0.75rem 0.9rem',
+        borderRadius: '0.6rem',
+        color: 'white',
+        fontSize: '0.85rem',
+        border: '1px solid rgba(255,255,255,0.2)',
+        boxShadow: '0 10px 25px rgba(0,0,0,0.25)',
+    },
+    toastSuccess: {
+        backgroundColor: 'rgba(16, 185, 129, 0.95)',
+    },
+    toastError: {
+        backgroundColor: 'rgba(220, 38, 38, 0.95)',
+    },
+    toastInfo: {
+        backgroundColor: 'rgba(30, 41, 59, 0.95)',
+    },
 }
 
 export default DataBrowser

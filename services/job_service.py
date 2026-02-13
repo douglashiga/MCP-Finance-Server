@@ -134,13 +134,13 @@ class JobService:
 
             running = session.query(JobRun).filter(
                 JobRun.job_id == job.id,
-                JobRun.status == "running",
+                JobRun.status.in_(["queued", "running"]),
                 JobRun.finished_at.is_(None),
             ).order_by(JobRun.started_at.desc()).first()
             if running:
                 return {
                     "success": False,
-                    "error": f"Job '{job.name}' is already running",
+                    "error": f"Job '{job.name}' is already {running.status}",
                     "job_name": job.name,
                     "run_id": running.id,
                 }
@@ -151,17 +151,14 @@ class JobService:
 
             run = session.query(JobRun).filter(JobRun.id == run_id).first()
             if not run:
-                return {"success": False, "error": f"Run {run_id} not found after execution"}
+                return {"success": False, "error": f"Run {run_id} not found after enqueue"}
 
             return {
                 "success": True,
                 "job_name": job.name,
                 "run_id": run_id,
                 "status": run.status,
-                "duration_seconds": run.duration_seconds,
-                "records_affected": run.records_affected,
-                "stdout": run.stdout[-500:] if run.stdout else None,
-                "stderr": run.stderr[-500:] if run.stderr else None,
+                "message": f"Job '{job.name}' queued for execution",
             }
 
         except Exception as e:

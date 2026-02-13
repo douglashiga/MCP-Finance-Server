@@ -148,62 +148,56 @@ class YahooService:
 
     @staticmethod
     def get_company_info(symbol: str) -> Dict[str, Any]:
-        """Get company profile: sector, industry, description, officers."""
-        logger.info(f"[YAHOO:COMPANY] {symbol}")
+        """Get company profile from local database snapshot tables."""
+        from dataloader.database import SessionLocal
+        from dataloader.models import Stock, CompanyProfile, RawYahooFundamental
+
+        logger.info(f"[YAHOO:COMPANY] {symbol} from local DB")
+
+        session = SessionLocal()
         try:
-            yf = _get_yf()
-            ticker = yf.Ticker(symbol)
-            info = ticker.info
+            stock = session.query(Stock).filter_by(symbol=symbol).first()
+            if not stock:
+                return {"success": False, "error": f"Stock {symbol} not found in database"}
+
+            profile = session.query(CompanyProfile).filter_by(stock_id=stock.id).first()
+            raw = session.query(RawYahooFundamental).filter_by(symbol=stock.symbol).order_by(
+                RawYahooFundamental.fetched_at.desc()
+            ).first()
+            raw_info = {}
+            if raw and raw.data:
+                try:
+                    import json
+                    raw_info = json.loads(raw.data)
+                except Exception:
+                    raw_info = {}
 
             data = {
-                "symbol": symbol,
-                "shortName": info.get("shortName"),
-                "longName": info.get("longName"),
-                "sector": info.get("sector"),
-                "industry": info.get("industry"),
-                "country": info.get("country"),
-                "city": info.get("city"),
-                "website": info.get("website"),
-                "longBusinessSummary": info.get("longBusinessSummary"),
-                "fullTimeEmployees": info.get("fullTimeEmployees"),
-                "exchange": info.get("exchange"),
-                "quoteType": info.get("quoteType"),
+                "symbol": stock.symbol,
+                "shortName": raw_info.get("shortName") or stock.name,
+                "longName": raw_info.get("longName") or stock.name,
+                "sector": stock.sector,
+                "industry": stock.industry,
+                "country": (profile.country if profile else None) or stock.country,
+                "city": profile.city if profile else raw_info.get("city"),
+                "website": profile.website if profile else raw_info.get("website"),
+                "longBusinessSummary": profile.business_summary if profile else raw_info.get("longBusinessSummary"),
+                "fullTimeEmployees": profile.employees if profile else raw_info.get("fullTimeEmployees"),
+                "exchange": stock.exchange,
+                "quoteType": "EQUITY",
+                "source": "local_database",
             }
             return {"success": True, "data": data}
-        except Exception as e:
-            logger.error(f"[YAHOO:COMPANY] Error: {e}")
-            return {"success": False, "error": str(e)}
+        finally:
+            session.close()
 
     @staticmethod
     def get_financial_statements(symbol: str) -> Dict[str, Any]:
-        """Get income statement, balance sheet, and cash flow (annual)."""
-        logger.info(f"[YAHOO:FINANCIALS] {symbol}")
-        try:
-            yf = _get_yf()
-            ticker = yf.Ticker(symbol)
+        """Get financial statements from local cached intelligence snapshot."""
+        from services.market_intelligence_service import MarketIntelligenceService
 
-            def df_to_dict(df):
-                if df is None or df.empty:
-                    return []
-                result = []
-                for col in df.columns:
-                    entry = {"period": str(col.date()) if hasattr(col, "date") else str(col)}
-                    for idx in df.index:
-                        val = df.at[idx, col]
-                        entry[str(idx)] = float(val) if val is not None and str(val) != 'nan' else None
-                    result.append(entry)
-                return result
-
-            data = {
-                "symbol": symbol,
-                "income_statement": df_to_dict(ticker.income_stmt),
-                "balance_sheet": df_to_dict(ticker.balance_sheet),
-                "cash_flow": df_to_dict(ticker.cashflow),
-            }
-            return {"success": True, "data": data}
-        except Exception as e:
-            logger.error(f"[YAHOO:FINANCIALS] Error: {e}")
-            return {"success": False, "error": str(e)}
+        logger.info(f"[YAHOO:FINANCIALS] {symbol} from local DB")
+        return MarketIntelligenceService.get_financial_statements(symbol, statement_type="all")
 
     @staticmethod
     def get_exchange_info(symbol: str) -> Dict[str, Any]:

@@ -7,10 +7,15 @@ Run with: python -m dataloader.seed
 import sys
 import os
 import argparse
+import shlex
+import subprocess
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dataloader.database import init_db, SessionLocal
 from dataloader.models import Job, StockMetrics, MarketMover
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SCRIPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts")
 
 
 # Pre-configured jobs (ELT Architecture)
@@ -87,6 +92,14 @@ DEFAULT_JOBS = [
         "cron_expression": "20 */2 * * *",  # Every 2 hours
         "timeout_seconds": 600,
         "affected_tables": "market_events",
+    },
+    {
+        "name": "Load Market Intelligence",
+        "description": "Loads local news, institutional holders, analyst recommendations, and financial statements snapshots",
+        "script_path": "load_market_intelligence.py --news-limit 25",
+        "cron_expression": "40 7 * * 1-5",  # Weekdays at 7:40 AM
+        "timeout_seconds": 1200,
+        "affected_tables": "stock_intelligence_snapshots",
     },
     
     # ===== TRANSFORMERS (Normalize raw data into domain tables) =====
@@ -211,9 +224,122 @@ DEFAULT_JOBS = [
 ]
 
 
+# Ordered first-load plan (strictly serial execution).
+# Master data first, then computational/derived tables.
+FIRST_LOAD_STEPS = [
+    # ===== MASTER DATA =====
+    {"phase": "MASTER", "name": "Reference Data Loader", "command": "load_reference_data.py", "timeout": 180},
+    {"phase": "MASTER", "name": "Stock List Loader", "command": "load_stock_list.py", "timeout": 240},
+    {"phase": "MASTER", "name": "Extract Yahoo Fundamentals", "command": "extract_yahoo_fundamentals.py", "timeout": 1800},
+    {"phase": "MASTER", "name": "Transform Fundamentals", "command": "transform_fundamentals.py", "timeout": 900},
+    {"phase": "MASTER", "name": "Normalize Classifications", "command": "normalize_classifications.py", "timeout": 900},
+    {"phase": "MASTER", "name": "Enrich Company Profiles", "command": "enrich_company_profiles.py", "timeout": 900},
+    {"phase": "MASTER", "name": "Historical Prices Loader (5y)", "command": "load_historical_prices.py --period 5y", "timeout": 5400},
+    {"phase": "MASTER", "name": "Dividends Loader (5y)", "command": "load_dividends.py --years 5", "timeout": 1800},
+    {"phase": "MASTER", "name": "Earnings Loader (10y)", "command": "load_earnings.py --years 10", "timeout": 2400},
+    {"phase": "MASTER", "name": "Curate Earnings Events", "command": "curate_earnings_events.py", "timeout": 900},
+    {"phase": "MASTER", "name": "Extract Yahoo Prices", "command": "extract_yahoo_prices.py", "timeout": 900},
+    {"phase": "MASTER", "name": "Transform Prices", "command": "transform_prices.py", "timeout": 600},
+    {"phase": "MASTER", "name": "Index Performance Loader", "command": "load_index_performance.py", "timeout": 900},
+
+    # ===== IB-DEPENDENT (still serial) =====
+    {"phase": "IB", "name": "Extract IBKR Instruments", "command": "extract_ibkr_instruments.py", "timeout": 1800, "ib_required": True},
+    {"phase": "IB", "name": "Extract IBKR Prices", "command": "extract_ibkr_prices.py", "timeout": 1200, "ib_required": True},
+    {"phase": "IB", "name": "Transform IBKR Prices", "command": "transform_ibkr_prices.py", "timeout": 900, "ib_required": True},
+    {"phase": "IB", "name": "Extract Option Metrics - OMX", "command": "extract_option_metrics.py --market OMX", "timeout": 2400, "ib_required": True},
+    {"phase": "IB", "name": "Extract Option Metrics - US", "command": "extract_option_metrics.py --market US", "timeout": 3000, "ib_required": True},
+    {"phase": "IB", "name": "Extract Option Metrics - B3", "command": "extract_option_metrics.py --market B3", "timeout": 2400, "ib_required": True},
+    {"phase": "IB", "name": "Snapshot Option IV", "command": "snapshot_option_iv.py", "timeout": 900},
+
+    # ===== COMPUTATIONAL / DERIVED =====
+    {"phase": "COMPUTE", "name": "Calculate Stock Metrics", "command": "calculate_stock_metrics.py", "timeout": 3600},
+    {"phase": "COMPUTE", "name": "Update Market Movers", "command": "update_market_movers.py", "timeout": 1200},
+    {"phase": "COMPUTE", "name": "Load Event Calendar", "command": "load_event_calendar.py --days-ahead 180 --lookback-days 14", "timeout": 1200},
+    {"phase": "COMPUTE", "name": "Load Market Intelligence", "command": "load_market_intelligence.py --news-limit 25", "timeout": 2400},
+]
+
+
+def _run_script_command(command: str, timeout: int = 1800):
+    """
+    Run a dataloader script command synchronously (serial mode).
+    Returns dict with success, records_affected, stdout_tail, stderr_tail.
+    """
+    parts = shlex.split(command)
+    if not parts:
+        return {
+            "success": False,
+            "records_affected": None,
+            "stdout_tail": "",
+            "stderr_tail": "Invalid empty command",
+            "exit_code": 1,
+        }
+
+    script_file = parts[0]
+    script_args = parts[1:]
+    script_path = script_file if os.path.isabs(script_file) else os.path.join(SCRIPTS_DIR, script_file)
+
+    if not os.path.exists(script_path):
+        return {
+            "success": False,
+            "records_affected": None,
+            "stdout_tail": "",
+            "stderr_tail": f"Script not found: {script_path}",
+            "exit_code": 1,
+        }
+
+    try:
+        proc = subprocess.run(
+            [sys.executable, script_path, *script_args],
+            cwd=PROJECT_ROOT,
+            env={**os.environ, "PYTHONPATH": PROJECT_ROOT},
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        stdout = proc.stdout or ""
+        stderr = proc.stderr or ""
+        records_affected = None
+        for line in stdout.splitlines():
+            if line.startswith("RECORDS_AFFECTED="):
+                try:
+                    records_affected = int(line.split("=", 1)[1].strip())
+                except Exception:
+                    records_affected = None
+
+        return {
+            "success": proc.returncode == 0,
+            "records_affected": records_affected,
+            "stdout_tail": "\n".join(stdout.splitlines()[-10:]),
+            "stderr_tail": "\n".join(stderr.splitlines()[-10:]),
+            "exit_code": proc.returncode,
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "success": False,
+            "records_affected": None,
+            "stdout_tail": "",
+            "stderr_tail": f"Timeout after {timeout}s",
+            "exit_code": -1,
+        }
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--warmup", action="store_true", help="Run heavy initial data warmup jobs")
+    parser.add_argument(
+        "--warmup",
+        action="store_true",
+        help="Deprecated flag. Full first-load now runs by default in serial mode.",
+    )
+    parser.add_argument(
+        "--skip-first-load",
+        action="store_true",
+        help="Only initialize DB and sync jobs, skip first-load execution.",
+    )
+    parser.add_argument(
+        "--skip-ib",
+        action="store_true",
+        help="Skip IB-dependent first-load steps (IBKR prices/instruments/options).",
+    )
     args = parser.parse_args()
 
     print("=" * 60)
@@ -260,75 +386,73 @@ def main():
     finally:
         session.close()
     
-    # 3. Run stock list loader to seed initial data
-    print("\n[3/3] Loading initial stock list...")
-    from dataloader.scripts.load_reference_data import main as load_reference_data
-    from dataloader.scripts.load_stock_list import main as load_stocks
-    load_reference_data()
-    load_stocks()
-    
-    # 4. Trigger initial data loading (Warm Start)
-    if not args.warmup:
-        print("\n[BONUS] Warmup skipped (use --warmup to run initial heavy loaders).")
+    # 3. First-load orchestration (serial only)
+    if args.warmup:
+        print("\n[3/3] Note: --warmup is deprecated. Running full first load (serial) by default.")
+
+    if args.skip_first_load:
+        print("\n[3/3] First load skipped by --skip-first-load.")
     else:
-        print("\n[BONUS] Warming up database with initial data...")
+        print("\n[3/3] Running FULL first load (serial, no parallel jobs)...")
+        current_phase = None
+        failures = []
+        completed = 0
+
+        for step in FIRST_LOAD_STEPS:
+            if step.get("ib_required") and args.skip_ib:
+                print(f"  ↷ Skipped IB step: {step['name']} (--skip-ib)")
+                continue
+
+            if step["phase"] != current_phase:
+                current_phase = step["phase"]
+                print(f"\n  [{current_phase}]")
+
+            print(f"  → {step['name']} ...")
+            result = _run_script_command(step["command"], timeout=step.get("timeout", 1800))
+            if result["success"]:
+                completed += 1
+                records = result.get("records_affected")
+                if records is not None:
+                    print(f"    ✓ OK (records={records})")
+                else:
+                    print("    ✓ OK")
+            else:
+                failures.append((step["name"], result))
+                print(f"    ⚠️  Failed (exit={result.get('exit_code')})")
+                if result.get("stderr_tail"):
+                    print(f"       stderr: {result['stderr_tail']}")
+
+        # Validate screener baseline and run fallback serially if needed.
+        verify_session = SessionLocal()
         try:
-            from dataloader.scripts.extract_yahoo_prices import main as extract_prices
-            from dataloader.scripts.transform_prices import main as transform_prices
-            from dataloader.scripts.load_historical_prices import main as load_historical
-            from dataloader.scripts.calculate_stock_metrics import main as calculate_metrics
-            from dataloader.scripts.update_market_movers import main as update_movers
-            from dataloader.scripts.normalize_classifications import main as normalize_classifications
-            from dataloader.scripts.enrich_company_profiles import main as enrich_company_profiles
-            from dataloader.scripts.curate_earnings_events import main as curate_earnings_events
-            from dataloader.scripts.load_event_calendar import main as load_event_calendar
+            metrics_count = verify_session.query(StockMetrics).count()
+            movers_count = verify_session.query(MarketMover).count()
+        finally:
+            verify_session.close()
 
-            print("  → Fetching current prices...")
-            extract_prices()
-            transform_prices()
+        if metrics_count == 0 or movers_count == 0:
+            print("\n  ⚠️  Screener baseline empty after first load. Running serial fallback...")
+            fallback_steps = [
+                ("Historical Prices Loader (1y fallback)", "load_historical_prices.py --period 1y", 2400),
+                ("Calculate Stock Metrics (fallback)", "calculate_stock_metrics.py", 3600),
+                ("Update Market Movers (fallback)", "update_market_movers.py", 1200),
+            ]
+            for name, cmd, timeout in fallback_steps:
+                print(f"  → {name} ...")
+                result = _run_script_command(cmd, timeout=timeout)
+                if result["success"]:
+                    print("    ✓ OK")
+                else:
+                    failures.append((name, result))
+                    print(f"    ⚠️  Failed (exit={result.get('exit_code')})")
+                    if result.get("stderr_tail"):
+                        print(f"       stderr: {result['stderr_tail']}")
 
-            print("  → Fetching historical pricing (5-year initial load)...")
-            load_historical(period="5y")
-
-            print("  → Fetching dividends (5-year initial load)...")
-            from dataloader.scripts.load_dividends import main as load_divs
-            load_divs(years=5)
-
-            print("  → Fetching earnings & calendar (10-year initial load)...")
-            from dataloader.scripts.load_earnings import main as load_earnings
-            load_earnings(years=10)
-            curate_earnings_events()
-
-            print("  → Normalizing sectors/industries and enriching company profiles...")
-            normalize_classifications()
-            enrich_company_profiles()
-
-            print("  → Calculating technical metrics & movers...")
-            calculate_metrics()
-            update_movers()
-
-            print("  → Building normalized event calendar...")
-            load_event_calendar(days_ahead=180, lookback_days=14)
-
-            # Validate screener baseline
-            verify_session = SessionLocal()
-            try:
-                metrics_count = verify_session.query(StockMetrics).count()
-                movers_count = verify_session.query(MarketMover).count()
-            finally:
-                verify_session.close()
-
-            if metrics_count == 0 or movers_count == 0:
-                print("  ⚠️  Screener baseline is empty after warm-up. Running fallback load...")
-                print("  → Fetching historical pricing (1-year fallback)...")
-                load_historical(period="1y")
-                print("  → Recalculating metrics and market movers...")
-                calculate_metrics()
-                update_movers()
-
-            print("  ✓ Initial data and metrics loaded")
-        except Exception as e:
-            print(f"  ⚠️  Warm up partially failed: {e}")
+        print(f"\n  ✓ First load finished (completed_steps={completed}, failed_steps={len(failures)})")
+        if failures:
+            print("  Failures summary:")
+            for name, result in failures:
+                print(f"   - {name} (exit={result.get('exit_code')})")
 
     print("\n" + "=" * 60)
     print("  ✓ Seed complete! Start the server with:")

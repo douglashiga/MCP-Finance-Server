@@ -169,6 +169,37 @@ class CompanyProfile(Base):
     stock = relationship("Stock")
 
 
+class StockIntelligenceSnapshot(Base):
+    """
+    Local cache snapshot for market intelligence data fetched during ETL.
+    Runtime MCP tools read from this table (no direct Yahoo calls).
+    """
+    __tablename__ = "stock_intelligence_snapshots"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    stock_id = Column(Integer, ForeignKey("stocks.id", ondelete="CASCADE"), nullable=False)
+    source = Column(String(30), nullable=False, default="yahoo")
+    fetched_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    # JSON payloads encoded as text
+    news_json = Column(Text)                          # list[news]
+    institutional_holders_json = Column(Text)         # list[holders]
+    major_holders_json = Column(Text)                 # dict[str, str]
+    analyst_recommendations_json = Column(Text)       # list[recommendations]
+    upgrades_downgrades_json = Column(Text)           # list[upgrades_downgrades]
+    analyst_price_targets_json = Column(Text)         # dict targets
+    financial_statements_json = Column(Text)          # dict statements
+    payload = Column(Text)                            # optional extra metadata
+
+    stock = relationship("Stock")
+
+    __table_args__ = (
+        UniqueConstraint("stock_id", name="uq_stock_intel_snapshot_stock"),
+        Index("ix_stock_intel_snapshot_stock", "stock_id"),
+        Index("ix_stock_intel_snapshot_fetched", "fetched_at"),
+    )
+
+
 class Fundamental(Base):
     """Fundamental data snapshot for a stock (one row per fetch)."""
     __tablename__ = "fundamentals"
@@ -744,7 +775,7 @@ class JobRun(Base):
     job_id = Column(Integer, ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False)
     started_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     finished_at = Column(DateTime)
-    status = Column(String(20), default="running")          # running, success, failed, timeout
+    status = Column(String(20), default="running")          # queued, running, success, failed, timeout
     exit_code = Column(Integer)
     stdout = Column(Text)
     stderr = Column(Text)

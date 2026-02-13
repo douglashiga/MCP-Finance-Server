@@ -16,6 +16,26 @@ Default market for LLM-facing analytics is `sweden`.
 - Fast answers for practical trading questions (screener, options, Wheel).
 - Clear data lineage from raw ingestion to curated analytics tables.
 
+## Why This Server vs Others
+
+- IBKR real-time + Yahoo + local curated cache (not only direct Yahoo API reads).
+- Wheel-first toolset (put selection, capacity, assignment flow, covered call continuation).
+- Options with greeks + option metrics snapshots for IV and screening.
+- Event risk modeling focused on Wheel impact windows.
+- Local pipeline with deterministic serial jobs and MCP-friendly discovery tools.
+
+### End-to-end Example 1 (Wheel Put Selection)
+
+1. `get_wheel_put_candidates(symbol='Nordea', market='sweden', delta_min=0.25, delta_max=0.35, dte_min=4, dte_max=10)`
+2. `analyze_wheel_put_risk(symbol='Nordea', pct_below_spot=5.0, target_dte=7)`
+3. `get_wheel_contract_capacity(symbol='Nordea', capital_sek=200000, market='sweden')`
+
+### End-to-end Example 2 (Event Risk Window)
+
+1. `get_wheel_event_risk_window(ticker='NDA-SE.ST', market='sweden', days_ahead=14)`
+2. `get_corporate_events(ticker='NDA-SE.ST', market='sweden')`
+3. `get_monetary_policy_events(market='sweden')`
+
 ## Architecture
 
 ```text
@@ -51,6 +71,7 @@ Key normalized/curated tables used by MCP tools:
 - `stock_classification_snapshots`, `company_profiles`
 - `raw_earnings_events`, `earnings_events`
 - `raw_market_events`, `market_events`
+- `stock_intelligence_snapshots` (local cache for news/holders/recommendations/statements)
 
 ## MCP Tool Groups
 
@@ -58,13 +79,22 @@ Key normalized/curated tables used by MCP tools:
 
 - `get_stock_price(symbol, exchange=None, currency='USD')`
 - `get_historical_data(symbol, duration='1 D', bar_size='1 hour', exchange=None, currency='USD')`
+- `get_historical_data_cached(symbol, period='1y', interval='1d')`
 - `search_symbol(query)`
 - `get_fundamentals(symbol)`
 - `get_dividends(symbol)`
+- `get_dividend_history(symbol, period='2y')`
 - `get_company_info(symbol)`
 - `get_financial_statements(symbol)`
+- `get_comprehensive_stock_info(symbol)`
 - `get_exchange_info(symbol)`
 - `yahoo_search(query)`
+
+### IB Account and Portfolio
+
+- `get_account_summary(masked=True)`
+- Resource: `finance://account/summary` (masked by default)
+- Resource: `finance://portfolio/positions`
 
 ### Stock Screener
 
@@ -90,6 +120,15 @@ Key normalized/curated tables used by MCP tools:
 - `get_option_greeks(symbol, last_trade_date, strike, right)`
 - `get_option_screener(symbol=None, expiry=None, right=None, min_delta=None, max_delta=None, min_iv=None, max_iv=None, has_liquidity=True, limit=50)`
 - `get_option_chain_snapshot(symbol, expiry=None)`
+- `get_options_data(symbol, expiration_date=None)`
+
+### Market Intelligence (Local Cache)
+
+- `get_news(symbol, limit=10)`
+- `get_institutional_holders(symbol, limit=50)`
+- `get_analyst_recommendations(symbol, limit=50)`
+- `get_technical_analysis(symbol, period='1y')`
+- `get_sector_performance(symbols)`
 
 ### Wheel Strategy Tools
 
@@ -136,6 +175,20 @@ Key normalized/curated tables used by MCP tools:
 
 - `get_market_capabilities()`
   - Returns grouped capabilities (`methods` + `examples`) so an LLM can answer "what can you do?" with concrete actions.
+- `describe_tool(tool_name)`
+  - Returns parameter schema (types/defaults), Pydantic JSON schema (when available), docstring summary and examples for one tool.
+- `help_tool(tool_name)`
+  - Alias for `describe_tool`, useful for agents that ask for `help`.
+- `get_server_health()`
+  - Returns health payload equivalent to `/health`.
+- `get_server_metrics(output_format='json'|'prometheus')`
+  - Returns metrics payload equivalent to `/metrics`.
+
+### Health and Metrics Resources
+
+- Resource: `finance://status`
+- Resource: `finance://health`
+- Resource: `finance://metrics`
 
 ## LLM Service Design Rules
 
@@ -151,6 +204,21 @@ Use these rules when adding/updating tools so other agents can depend on stable 
 8. Keep response keys stable; avoid breaking renames.
 9. Keep table schema stable when possible; evolve at query/service layer.
 10. Protect admin endpoints with API key and strict script-path validation.
+
+### Agent Directives (MCP-friendly)
+
+Use these directives when wiring another AI agent to this server:
+
+1. Start by calling `get_market_capabilities()` for intent routing.
+2. For unknown tools, call `describe_tool(tool_name)` before execution.
+3. Prefer intent-specific tools over broad queries.
+4. Always use explicit market defaults (`market='sweden'`) unless user overrides.
+5. Respect uncertainty: if backend has no data, return insufficient-data response.
+6. Never infer timestamps; use `meta.asof` from tool responses.
+7. In Yahoo-only mode (`IB_ENABLED=false`), avoid IB tools and fallback to local/Yahoo tools.
+8. For sensitive info, keep `get_account_summary(masked=True)` unless user explicitly requests otherwise in trusted environment.
+9. If a tool returns `validation_error`, fix input and retry once with corrected parameters.
+10. If a source is open-circuited (`circuit_open`), avoid repeated retries until cooldown.
 
 ### Event Modeling Rules
 
@@ -181,12 +249,26 @@ Preferred shape:
 ```json
 {
   "success": true,
-  "data": [],
-  "count": 0,
-  "criteria": {},
-  "empty_reason": null
+  "data": {},
+  "error": {
+    "code": null,
+    "message": null,
+    "details": null
+  },
+  "meta": {
+    "source": "ibkr|yahoo|local_db|pipeline|system|...",
+    "asof": "2026-02-13T12:34:56.000000+00:00",
+    "cache_ttl": null,
+    "request_id": "uuid",
+    "default_market": "sweden",
+    "market_timezone": "Europe/Stockholm"
+  }
 }
 ```
+
+Notes:
+- The envelope is normalized in `mcp_server.py` (`tool_endpoint` decorator).
+- Existing service-specific keys (`count`, `criteria`, etc.) are preserved.
 
 ## Wheel Analytics Formulas
 
@@ -212,22 +294,42 @@ Major jobs in `dataloader/seed.py` include:
 - Normalization: prices, fundamentals, classification taxonomy, company profiles.
 - Curation: earnings events.
 - Analytics: stock metrics, market movers, option IV snapshots, event calendar.
+- Intelligence cache: news, institutional holders, analyst recommendations, financial statements snapshots.
 - Loaders: stock list, reference data, dividends, historical prices, index performance.
 - Validation: pipeline health check.
 
 Seed behavior (`python -m dataloader.seed`):
 - Idempotent sync of default jobs: missing jobs are created and existing jobs are updated (description/script/cron/timeout/tables) without duplicating rows.
-- `--warmup` is optional; heavy initial load only runs when explicitly requested.
-- Warmup now includes:
+- Full first load runs by default and always in serial (no parallel job execution).
+- Load order is phase-based to maximize robustness:
+  - `MASTER`: reference/tickers/raw+transform/history/dividends/earnings/classification.
+  - `IB`: IBKR extractors/options (still serial, can be skipped).
+  - `COMPUTE`: metrics/movers/events/intelligence snapshots.
+- First-load dataset includes:
   - historical prices (5y),
   - dividends (5y),
   - earnings (10y) + curation,
   - classification normalization + company profile enrichment,
   - stock metrics + market movers,
   - normalized event calendar generation.
-- Built-in fallback: if screener baseline remains empty after warmup, it retries historical load + metrics/movers.
+  - market intelligence snapshots.
+- Built-in fallback: if screener baseline remains empty, it retries historical load + metrics/movers.
+- Optional flags:
+  - `--skip-first-load`: only init DB + sync jobs.
+  - `--skip-ib`: skip IB-dependent steps during first load.
+  - `--warmup`: deprecated alias (first load is already default).
 
 ## Quick Start
+
+### 5-minute onboarding (plug-and-play)
+
+```bash
+pip install -e .
+python -m dataloader.seed --skip-ib
+IB_ENABLED=false mcp-finance
+```
+
+Then point your MCP client to this server (examples below).
 
 ### Docker
 
@@ -241,8 +343,105 @@ docker compose --profile init run seed
 ```bash
 pip install -e .
 python -m dataloader.seed
-python -m mcp_server.py
+mcp-finance
 python -m dataloader.app
+```
+
+### Runtime Profiles
+
+- `Yahoo-only`:
+  - `IB_ENABLED=false`
+  - No IB connection attempt on startup.
+  - IB tools return structured `ib_disabled` errors.
+- `IBKR + Yahoo`:
+  - `IB_ENABLED=true` (default)
+  - Requires IB Gateway/TWS connectivity and market data permissions.
+
+### Environment Variables (Reference)
+
+- `IB_ENABLED`:
+  - `true|false` (default `true`)
+- `MCP_TRANSPORT`:
+  - `sse|stdio` (default `sse`)
+- `MCP_HOST`:
+  - default `0.0.0.0`
+- `MCP_PORT`:
+  - default `8000`
+- `DEFAULT_MARKET`:
+  - default `sweden`
+- `DEFAULT_MARKET_TIMEZONE`:
+  - default `Europe/Stockholm`
+- `MCP_TOOL_ALLOWLIST`:
+  - comma-separated tool names; if set, only listed tools are callable
+- `CIRCUIT_BREAKER_FAILURE_THRESHOLD`:
+  - default `4`
+- `CIRCUIT_BREAKER_COOLDOWN_SECONDS`:
+  - default `45`
+
+### MCP Client Config Examples
+
+#### Claude Desktop
+
+```json
+{
+  "mcpServers": {
+    "finance": {
+      "command": "mcp-finance",
+      "env": {
+        "IB_ENABLED": "false",
+        "DEFAULT_MARKET": "sweden",
+        "DEFAULT_MARKET_TIMEZONE": "Europe/Stockholm"
+      }
+    }
+  }
+}
+```
+
+#### Cursor
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "finance": {
+        "command": "mcp-finance",
+        "args": [],
+        "env": {
+          "IB_ENABLED": "true",
+          "MCP_TRANSPORT": "stdio"
+        }
+      }
+    }
+  }
+}
+```
+
+#### Windsurf
+
+```json
+{
+  "mcpServers": [
+    {
+      "name": "finance",
+      "command": "mcp-finance",
+      "env": {
+        "IB_ENABLED": "false"
+      }
+    }
+  ]
+}
+```
+
+#### Minimal Python Agent
+
+```python
+import os
+import subprocess
+
+env = os.environ.copy()
+env["IB_ENABLED"] = "false"
+proc = subprocess.Popen(["mcp-finance"], env=env)
+print("MCP Finance server PID:", proc.pid)
 ```
 
 ## Security Notes
@@ -250,6 +449,37 @@ python -m dataloader.app
 - Set `DATALOADER_API_KEY` for admin API endpoints.
 - Keep `DATALOADER_ALLOW_INSECURE=true` only in local development.
 - Configure CORS with `DATALOADER_ALLOWED_ORIGINS`.
+- Optional tool allowlist: set `MCP_TOOL_ALLOWLIST=get_market_capabilities,describe_tool,...`.
+- Account summary is masked by default (`get_account_summary(masked=true)`).
+- If running MCP over network transport (`MCP_TRANSPORT=sse`), keep host/firewall restricted and use API/auth controls on your MCP client gateway.
+
+### Threat Model (What this server does NOT do)
+
+- Does not place orders.
+- Does not modify positions.
+- Does not submit trades.
+- Does not transfer funds.
+- Does not provide guaranteed forecasts.
+
+Read-only by design: analytics, screening, events, account inspection, and pipeline control only.
+
+## Observability and Operations
+
+- `get_server_health()` and resource `finance://health`
+- `get_server_metrics(output_format='json'|'prometheus')` and resource `finance://metrics`
+- Structured JSON logs per tool call (`request_id`, tool, source, latency, success)
+- Circuit breaker by source (IBKR/Yahoo/local groups) with cooldown
+- Built-in tool-level metrics: calls/failures/avg latency/source breakdown
+- Rate limiter metrics exposed via IB connection runtime snapshot
+
+## Code Quality and Releases
+
+- `pre-commit` hooks configured (`ruff`, `black`, `isort`, `mypy`)
+- GitHub Actions CI (`.github/workflows/ci.yml`) running lint, type-check and tests
+- Recommended release flow:
+  - bump `version` in `pyproject.toml`
+  - create git tag (`vX.Y.Z`)
+  - update changelog/release notes
 
 ## Operational Notes
 
@@ -260,9 +490,15 @@ python -m dataloader.app
 - If Wheel IV analysis reports insufficient history, run option metrics jobs and `Snapshot Option IV` for multiple days.
 - If option greeks are sparse, ensure IB market data permissions and option subscriptions are active.
 - For macro/monetary/geopolitical events, maintain `dataloader/data/manual_events.json` and run `Load Event Calendar`.
+- To refresh local news/holders/recommendations/statements cache, run `Load Market Intelligence`.
 - To avoid duplicate manual runs, backend and frontend both protect against concurrent triggers for the same job:
-  - backend returns `"Job '<name>' is already running"` when an open run exists,
+  - backend returns `"Job '<name>' is already queued/running"` when an open run exists,
   - frontend disables the run button while request is in flight.
+- Scheduler execution model is now a single-worker queue:
+  - all cron/manual triggers are enqueued with `status='queued'`,
+  - only one job runs at a time globally,
+  - same job is deduplicated while already `queued/running`.
+  - on scheduler startup, orphan `queued/running` runs are auto-recovered to `failed`.
 - Jobs UI uses in-app notifications/toasts and confirmation modal (no browser `alert()` flow).
 
 ## Troubleshooting

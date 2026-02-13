@@ -125,6 +125,16 @@ class IBConnection:
         except Exception as e:
             return {"status": "degraded", "error": str(e), "host": HOST, "port": PORT}
 
+    def runtime_metrics(self) -> dict:
+        return {
+            "ib_enabled": os.environ.get("IB_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
+            "connected": self.is_connected(),
+            "host": HOST,
+            "port": PORT,
+            "client_id": CLIENT_ID,
+            "rate_limiter": self.rate_limiter.snapshot(),
+        }
+
     async def start_heartbeat(self):
         """Start periodic health check for 24/7 operation."""
         if self._heartbeat_task is not None:

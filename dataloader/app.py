@@ -5,13 +5,16 @@ Run with: python -m dataloader.app
 import logging
 import os
 import secrets
+import re
+import csv
+import io
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -46,6 +49,27 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 os.makedirs(STATIC_DIR, exist_ok=True)
 os.makedirs(SCRIPTS_DIR, exist_ok=True)
 SCRIPTS_DIR_PATH = Path(SCRIPTS_DIR).resolve()
+
+IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+TYPE_RE = re.compile(r"^\s*([A-Za-z ]+?)\s*(\((\d+)(\s*,\s*(\d+))?\))?\s*$")
+ALLOWED_SQL_TYPES = {
+    "INTEGER",
+    "BIGINT",
+    "SMALLINT",
+    "FLOAT",
+    "REAL",
+    "DOUBLE",
+    "DOUBLE PRECISION",
+    "NUMERIC",
+    "DECIMAL",
+    "TEXT",
+    "VARCHAR",
+    "CHAR",
+    "BOOLEAN",
+    "DATE",
+    "DATETIME",
+    "TIMESTAMP",
+}
 
 
 def require_admin_api_key(x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")):
@@ -89,6 +113,49 @@ def _resolve_script_path(filename: str) -> Path:
     return resolved
 
 
+def _validate_identifier(name: str, field_name: str = "identifier") -> str:
+    if not name or not IDENTIFIER_RE.fullmatch(name):
+        raise HTTPException(400, f"Invalid {field_name}. Use letters, numbers and underscore, starting with letter/underscore.")
+    return name
+
+
+def _quote_ident(name: str) -> str:
+    return f'"{name}"'
+
+
+def _normalize_sql_type(sql_type: str) -> str:
+    if not sql_type:
+        raise HTTPException(400, "Column type is required")
+
+    m = TYPE_RE.fullmatch(sql_type.strip())
+    if not m:
+        raise HTTPException(400, f"Invalid SQL type '{sql_type}'")
+
+    base = " ".join(m.group(1).strip().upper().split())
+    if base not in ALLOWED_SQL_TYPES:
+        raise HTTPException(400, f"Unsupported SQL type '{base}'")
+
+    precision = m.group(3)
+    scale = m.group(5)
+    if precision:
+        if scale:
+            return f"{base}({precision},{scale})"
+        return f"{base}({precision})"
+    return base
+
+
+def _sql_default_literal(value: Any) -> str:
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, (int, float)):
+        return str(value)
+    # Strings and everything else as quoted literals
+    txt = str(value).replace("'", "''")
+    return f"'{txt}'"
+
+
 # ============================================================================
 # Pydantic Schemas
 # ============================================================================
@@ -108,6 +175,39 @@ class JobUpdate(BaseModel):
     cron_expression: Optional[str] = None
     is_active: Optional[bool] = None
     timeout_seconds: Optional[int] = None
+
+
+class SchemaColumnCreate(BaseModel):
+    name: str
+    type: str
+    nullable: bool = True
+    primary_key: bool = False
+    default: Optional[Any] = None
+
+
+class SchemaCreateTableRequest(BaseModel):
+    table_name: str
+    columns: list[SchemaColumnCreate]
+
+
+class SchemaAddColumnRequest(BaseModel):
+    name: str
+    type: str
+    nullable: bool = True
+    default: Optional[Any] = None
+
+
+class SchemaRenameRequest(BaseModel):
+    new_name: str
+
+
+def _table_exists(inspector, table_name: str) -> bool:
+    return table_name in inspector.get_table_names()
+
+
+def _column_exists(inspector, table_name: str, column_name: str) -> bool:
+    cols = inspector.get_columns(table_name)
+    return any(c["name"] == column_name for c in cols)
 
 
 # ============================================================================
@@ -169,6 +269,175 @@ def get_schema(_auth: None = Depends(require_admin_api_key)):
     return {"tables": tables}
 
 
+@app.post("/api/schema/tables")
+def create_table(payload: SchemaCreateTableRequest, _auth: None = Depends(require_admin_api_key)):
+    table_name = _validate_identifier(payload.table_name, "table_name")
+    if not payload.columns:
+        raise HTTPException(400, "At least one column is required")
+
+    inspector = inspect(engine)
+    if _table_exists(inspector, table_name):
+        raise HTTPException(409, f"Table '{table_name}' already exists")
+
+    seen = set()
+    column_defs = []
+    pk_columns = []
+
+    for col in payload.columns:
+        col_name = _validate_identifier(col.name, "column_name")
+        if col_name in seen:
+            raise HTTPException(400, f"Duplicate column '{col_name}'")
+        seen.add(col_name)
+
+        col_type = _normalize_sql_type(col.type)
+        parts = [f'{_quote_ident(col_name)} {col_type}']
+        if not col.nullable:
+            parts.append("NOT NULL")
+        if col.default is not None:
+            parts.append(f"DEFAULT {_sql_default_literal(col.default)}")
+        column_defs.append(" ".join(parts))
+
+        if col.primary_key:
+            pk_columns.append(col_name)
+
+    if pk_columns:
+        quoted_pk = ", ".join(_quote_ident(c) for c in pk_columns)
+        column_defs.append(f"PRIMARY KEY ({quoted_pk})")
+
+    sql = f'CREATE TABLE {_quote_ident(table_name)} ({", ".join(column_defs)})'
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(sql))
+    except Exception as exc:
+        logger.exception("Failed to create table %s", table_name)
+        raise HTTPException(400, f"Failed to create table: {exc}")
+
+    return {"status": "created", "table": table_name}
+
+
+@app.post("/api/schema/tables/{table_name}/columns")
+def add_column(table_name: str, payload: SchemaAddColumnRequest, _auth: None = Depends(require_admin_api_key)):
+    safe_table = _validate_identifier(table_name, "table_name")
+    column_name = _validate_identifier(payload.name, "column_name")
+    column_type = _normalize_sql_type(payload.type)
+
+    inspector = inspect(engine)
+    if not _table_exists(inspector, safe_table):
+        raise HTTPException(404, f"Table '{safe_table}' not found")
+    if _column_exists(inspector, safe_table, column_name):
+        raise HTTPException(409, f"Column '{column_name}' already exists in '{safe_table}'")
+
+    sql = f'ALTER TABLE {_quote_ident(safe_table)} ADD COLUMN {_quote_ident(column_name)} {column_type}'
+    if not payload.nullable:
+        sql += " NOT NULL"
+    if payload.default is not None:
+        sql += f" DEFAULT {_sql_default_literal(payload.default)}"
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(sql))
+    except Exception as exc:
+        logger.exception("Failed to add column %s to %s", column_name, safe_table)
+        raise HTTPException(400, f"Failed to add column: {exc}")
+
+    return {"status": "column_added", "table": safe_table, "column": column_name}
+
+
+@app.patch("/api/schema/tables/{table_name}")
+def rename_table(table_name: str, payload: SchemaRenameRequest, _auth: None = Depends(require_admin_api_key)):
+    safe_table = _validate_identifier(table_name, "table_name")
+    new_name = _validate_identifier(payload.new_name, "new_name")
+
+    inspector = inspect(engine)
+    if not _table_exists(inspector, safe_table):
+        raise HTTPException(404, f"Table '{safe_table}' not found")
+    if _table_exists(inspector, new_name):
+        raise HTTPException(409, f"Table '{new_name}' already exists")
+
+    sql = f'ALTER TABLE {_quote_ident(safe_table)} RENAME TO {_quote_ident(new_name)}'
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(sql))
+    except Exception as exc:
+        logger.exception("Failed to rename table %s to %s", safe_table, new_name)
+        raise HTTPException(400, f"Failed to rename table: {exc}")
+
+    return {"status": "renamed", "old_name": safe_table, "new_name": new_name}
+
+
+@app.patch("/api/schema/tables/{table_name}/columns/{column_name}")
+def rename_column(table_name: str, column_name: str, payload: SchemaRenameRequest, _auth: None = Depends(require_admin_api_key)):
+    safe_table = _validate_identifier(table_name, "table_name")
+    safe_column = _validate_identifier(column_name, "column_name")
+    new_name = _validate_identifier(payload.new_name, "new_name")
+
+    inspector = inspect(engine)
+    if not _table_exists(inspector, safe_table):
+        raise HTTPException(404, f"Table '{safe_table}' not found")
+    if not _column_exists(inspector, safe_table, safe_column):
+        raise HTTPException(404, f"Column '{safe_column}' not found in '{safe_table}'")
+    if _column_exists(inspector, safe_table, new_name):
+        raise HTTPException(409, f"Column '{new_name}' already exists in '{safe_table}'")
+
+    sql = (
+        f'ALTER TABLE {_quote_ident(safe_table)} '
+        f'RENAME COLUMN {_quote_ident(safe_column)} TO {_quote_ident(new_name)}'
+    )
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(sql))
+    except Exception as exc:
+        logger.exception("Failed to rename column %s.%s to %s", safe_table, safe_column, new_name)
+        raise HTTPException(400, f"Failed to rename column: {exc}")
+
+    return {
+        "status": "column_renamed",
+        "table": safe_table,
+        "old_name": safe_column,
+        "new_name": new_name,
+    }
+
+
+@app.delete("/api/schema/tables/{table_name}")
+def delete_table(table_name: str, _auth: None = Depends(require_admin_api_key)):
+    safe_table = _validate_identifier(table_name, "table_name")
+    inspector = inspect(engine)
+    if not _table_exists(inspector, safe_table):
+        raise HTTPException(404, f"Table '{safe_table}' not found")
+
+    sql = f'DROP TABLE {_quote_ident(safe_table)}'
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(sql))
+    except Exception as exc:
+        logger.exception("Failed to drop table %s", safe_table)
+        raise HTTPException(400, f"Failed to delete table: {exc}")
+
+    return {"status": "deleted", "table": safe_table}
+
+
+@app.delete("/api/schema/tables/{table_name}/columns/{column_name}")
+def delete_column(table_name: str, column_name: str, _auth: None = Depends(require_admin_api_key)):
+    safe_table = _validate_identifier(table_name, "table_name")
+    safe_column = _validate_identifier(column_name, "column_name")
+
+    inspector = inspect(engine)
+    if not _table_exists(inspector, safe_table):
+        raise HTTPException(404, f"Table '{safe_table}' not found")
+    if not _column_exists(inspector, safe_table, safe_column):
+        raise HTTPException(404, f"Column '{safe_column}' not found in '{safe_table}'")
+
+    sql = f'ALTER TABLE {_quote_ident(safe_table)} DROP COLUMN {_quote_ident(safe_column)}'
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(sql))
+    except Exception as exc:
+        logger.exception("Failed to drop column %s from %s", safe_column, safe_table)
+        raise HTTPException(400, f"Failed to delete column: {exc}")
+
+    return {"status": "column_deleted", "table": safe_table, "column": safe_column}
+
+
 @app.get("/api/tables/{table_name}")
 def browse_table(
     table_name: str,
@@ -185,29 +454,26 @@ def browse_table(
     offset = (page - 1) * per_page
     
     with engine.connect() as conn:
-        # Get total count
-        count_q = f'SELECT COUNT(*) FROM "{table_name}"'
-        total = conn.execute(text(count_q)).scalar()
-        
-        # Get column names
         cols = [c["name"] for c in inspector.get_columns(table_name)]
-        
-        # Build query
-        query = f'SELECT * FROM "{table_name}"'
+        where_clause = ""
+        params = {}
         if search:
-            # Search across text columns
-            text_cols = [c["name"] for c in inspector.get_columns(table_name)
-                        if "CHAR" in str(c["type"]).upper() or "TEXT" in str(c["type"]).upper()]
-            if text_cols:
-                conditions = " OR ".join([f'"{c}" LIKE :search' for c in text_cols])
-                query += f" WHERE {conditions}"
-        
-        query += f" LIMIT {per_page} OFFSET {offset}"
-        
-        if search:
-            rows = conn.execute(text(query), {"search": f"%{search}%"}).fetchall()
-        else:
-            rows = conn.execute(text(query)).fetchall()
+            # Search across all columns by text-casting values
+            conditions = " OR ".join([f'CAST("{c}" AS TEXT) LIKE :search' for c in cols])
+            where_clause = f" WHERE {conditions}"
+            params["search"] = f"%{search}%"
+
+        count_q = f'SELECT COUNT(*) FROM "{table_name}"{where_clause}'
+        total = conn.execute(text(count_q), params).scalar()
+
+        query = (
+            f'SELECT * FROM "{table_name}"{where_clause} '
+            f"LIMIT :limit OFFSET :offset"
+        )
+        rows = conn.execute(
+            text(query),
+            {**params, "limit": per_page, "offset": offset},
+        ).fetchall()
         
         data = [dict(zip(cols, row)) for row in rows]
     
@@ -222,6 +488,45 @@ def browse_table(
             "pages": (total + per_page - 1) // per_page,
         }
     }
+
+
+@app.get("/api/tables/{table_name}/export.csv")
+def export_table_csv(
+    table_name: str,
+    search: str = None,
+    _auth: None = Depends(require_admin_api_key),
+):
+    """Export table data as CSV, optionally filtered by search."""
+    inspector = inspect(engine)
+    if table_name not in inspector.get_table_names():
+        raise HTTPException(404, f"Table '{table_name}' not found")
+
+    cols = [c["name"] for c in inspector.get_columns(table_name)]
+    where_clause = ""
+    params = {}
+    if search:
+        conditions = " OR ".join([f'CAST("{c}" AS TEXT) LIKE :search' for c in cols])
+        where_clause = f" WHERE {conditions}"
+        params["search"] = f"%{search}%"
+
+    query = f'SELECT * FROM "{table_name}"{where_clause}'
+    with engine.connect() as conn:
+        rows = conn.execute(text(query), params).fetchall()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(cols)
+    for row in rows:
+        writer.writerow(list(row))
+    output.seek(0)
+
+    filename = f"{table_name}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv; charset=utf-8",
+        headers=headers,
+    )
 
 
 # ============================================================================
@@ -373,7 +678,7 @@ async def trigger_job(job_id: int, _auth: None = Depends(require_admin_api_key))
         session.close()
     
     run_id = await scheduler.trigger_job(job_id)
-    return {"run_id": run_id, "status": "executed"}
+    return {"run_id": run_id, "status": "queued"}
 
 
 # ============================================================================
@@ -526,6 +831,7 @@ def get_stats(_auth: None = Depends(require_admin_api_key)):
         
         # Next scheduled runs
         next_runs = scheduler.get_next_runs()
+        queue_status = scheduler.get_queue_status()
         
         return {
             "jobs": {"total": total_jobs, "active": active_jobs},
@@ -542,6 +848,7 @@ def get_stats(_auth: None = Depends(require_admin_api_key)):
                 "stderr": (f.JobRun.stderr or "")[:200],
             } for f in recent_failures],
             "next_runs": next_runs[:5],
+            "queue": queue_status,
         }
     finally:
         session.close()

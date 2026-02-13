@@ -1,9 +1,16 @@
 import asyncio
+import inspect
+import json
 import logging
 import os
 import signal
-from typing import Any, Dict, List
+import time
+import uuid
+from datetime import datetime, timezone
+from functools import wraps
+from typing import Any, Callable, Dict, List, Optional
 from mcp.server.fastmcp import FastMCP
+from pydantic import BaseModel
 
 # Fix Event Loop before ib_insync import
 try:
@@ -25,6 +32,7 @@ from services.option_screener_service import OptionScreenerService
 from services.classification_service import ClassificationService
 from services.wheel_service import WheelService
 from services.event_service import EventService
+from services.market_intelligence_service import MarketIntelligenceService
 
 # Local DB imports
 from dataloader.database import SessionLocal
@@ -45,6 +53,16 @@ logger = logging.getLogger(__name__)
 MCP_HOST = os.environ.get('MCP_HOST', '0.0.0.0')
 MCP_PORT = int(os.environ.get('MCP_PORT', '8000'))
 MCP_TRANSPORT = os.environ.get('MCP_TRANSPORT', 'sse')  # 'sse' for network, 'stdio' for local
+IB_ENABLED = os.environ.get("IB_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+DEFAULT_MARKET = os.environ.get("DEFAULT_MARKET", "sweden").lower()
+DEFAULT_MARKET_TIMEZONE = os.environ.get("DEFAULT_MARKET_TIMEZONE", "Europe/Stockholm")
+
+_allowlist_raw = os.environ.get("MCP_TOOL_ALLOWLIST", "").strip()
+MCP_TOOL_ALLOWLIST = {
+    item.strip()
+    for item in _allowlist_raw.split(",")
+    if item.strip()
+}
 
 mcp = FastMCP("mcp-finance", host=MCP_HOST, port=MCP_PORT)
 
@@ -62,7 +80,14 @@ MARKET_CAPABILITIES = [
     {
         "category": "fundamentals",
         "description": "Fundamentos, dividendos e perfil de empresa.",
-        "methods": ["get_fundamentals", "get_dividends", "get_company_info", "get_financial_statements"],
+        "methods": [
+            "get_fundamentals",
+            "get_dividends",
+            "get_dividend_history",
+            "get_company_info",
+            "get_comprehensive_stock_info",
+            "get_financial_statements",
+        ],
         "examples": [
             "Quais os fundamentos da VOLV-B.ST?",
             "Quais acoes suecas pagam mais dividendos?",
@@ -84,10 +109,32 @@ MARKET_CAPABILITIES = [
     {
         "category": "options_and_greeks",
         "description": "Option chain, greeks e screener de opcoes com filtros de delta/IV/liquidez.",
-        "methods": ["get_option_chain", "get_option_greeks", "get_option_screener", "get_option_chain_snapshot"],
+        "methods": [
+            "get_option_chain",
+            "get_option_greeks",
+            "get_option_screener",
+            "get_option_chain_snapshot",
+            "get_options_data",
+        ],
         "examples": [
             "Mostre puts com delta entre 0.25 e 0.35 para Nordea.",
             "Qual o delta/IV da call da SEB com vencimento mais proximo?",
+        ],
+    },
+    {
+        "category": "market_intelligence",
+        "description": "News, holders institucionais, recomendacoes de analistas e analise tecnica via cache local.",
+        "methods": [
+            "get_news",
+            "get_institutional_holders",
+            "get_analyst_recommendations",
+            "get_technical_analysis",
+            "get_sector_performance",
+            "get_historical_data_cached",
+        ],
+        "examples": [
+            "Quais sao as noticias mais recentes da Volvo?",
+            "Me mostre analise tecnica (RSI/MACD/Bollinger) da Nordea.",
         ],
     },
     {
@@ -126,10 +173,374 @@ MARKET_CAPABILITIES = [
             "Dispare o job Calculate Stock Metrics agora.",
         ],
     },
+    {
+        "category": "server_introspection",
+        "description": "Descoberta de tools e observabilidade operacional.",
+        "methods": ["describe_tool", "help_tool", "get_server_health", "get_server_metrics", "get_market_capabilities"],
+        "examples": [
+            "Descreva os parametros da tool get_option_screener.",
+            "Me mostre a saude do servidor e metricas.",
+        ],
+    },
 ]
 
 
+ALLOWED_HISTORICAL_DURATIONS = {"1 D", "1 W", "1 M", "3 M", "1 Y"}
+ALLOWED_HISTORICAL_BAR_SIZES = {"1 min", "5 mins", "15 mins", "1 hour", "1 day"}
+ALLOWED_OPTION_RIGHTS = {"C", "P"}
+CB_FAILURE_THRESHOLD = int(os.environ.get("CIRCUIT_BREAKER_FAILURE_THRESHOLD", "4"))
+CB_COOLDOWN_SECONDS = int(os.environ.get("CIRCUIT_BREAKER_COOLDOWN_SECONDS", "45"))
+
+TOOL_METRICS: Dict[str, Any] = {
+    "requests_total": 0,
+    "failures_total": 0,
+    "latency_ms_total": 0.0,
+    "tool_calls": {},
+    "tool_failures": {},
+    "source_calls": {},
+    "source_failures": {},
+}
+
+TOOL_REGISTRY: Dict[str, Callable[..., Any]] = {}
+
+
+class HistoricalDataInput(BaseModel):
+    duration: str = "1 D"
+    bar_size: str = "1 hour"
+
+
+class OptionGreeksInput(BaseModel):
+    last_trade_date: str
+    right: str
+
+
+class OptionScreenerInput(BaseModel):
+    right: Optional[str] = None
+    limit: int = 50
+
+
+TOOL_INPUT_MODELS: Dict[str, type[BaseModel]] = {
+    "get_historical_data": HistoricalDataInput,
+    "get_option_greeks": OptionGreeksInput,
+    "get_option_screener": OptionScreenerInput,
+}
+
+
+class _CircuitBreaker:
+    def __init__(self):
+        self._states: Dict[str, Dict[str, Any]] = {}
+
+    def _state(self, source: str) -> Dict[str, Any]:
+        return self._states.setdefault(
+            source,
+            {"consecutive_failures": 0, "opened_until": 0.0, "last_error": None},
+        )
+
+    def is_open(self, source: str) -> bool:
+        state = self._state(source)
+        return time.time() < float(state["opened_until"])
+
+    def on_success(self, source: str) -> None:
+        state = self._state(source)
+        state["consecutive_failures"] = 0
+        state["opened_until"] = 0.0
+        state["last_error"] = None
+
+    def on_failure(self, source: str, error_message: str) -> None:
+        state = self._state(source)
+        state["consecutive_failures"] += 1
+        state["last_error"] = error_message
+        if state["consecutive_failures"] >= CB_FAILURE_THRESHOLD:
+            state["opened_until"] = time.time() + CB_COOLDOWN_SECONDS
+
+    def snapshot(self) -> Dict[str, Any]:
+        now = time.time()
+        out: Dict[str, Any] = {}
+        for source, state in self._states.items():
+            out[source] = {
+                "is_open": now < float(state["opened_until"]),
+                "opened_for_seconds": max(0, int(state["opened_until"] - now)),
+                "consecutive_failures": state["consecutive_failures"],
+                "last_error": state["last_error"],
+            }
+        return out
+
+
+CIRCUIT_BREAKER = _CircuitBreaker()
+
+
+def _safe_iso_utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _normalize_error(error: Any) -> Dict[str, Any]:
+    if error is None:
+        return {"code": None, "message": None, "details": None}
+    if isinstance(error, dict):
+        return {
+            "code": error.get("code"),
+            "message": error.get("message") or error.get("error") or "Unknown error",
+            "details": error.get("details"),
+        }
+    return {"code": "runtime_error", "message": str(error), "details": None}
+
+
+def _annotation_to_string(annotation: Any) -> str:
+    if annotation is inspect.Signature.empty:
+        return "Any"
+    if isinstance(annotation, type):
+        return annotation.__name__
+    return str(annotation).replace("typing.", "")
+
+
+def _is_tool_allowed(tool_name: str) -> bool:
+    if not MCP_TOOL_ALLOWLIST:
+        return True
+    return tool_name in MCP_TOOL_ALLOWLIST
+
+
+def _infer_source(tool_name: str) -> str:
+    if tool_name in {"get_stock_price", "get_historical_data", "search_symbol", "get_account_summary", "get_option_chain", "get_option_greeks"}:
+        return "ibkr"
+    if tool_name in {"get_fundamentals", "get_dividends", "get_company_info", "get_financial_statements", "get_exchange_info", "yahoo_search", "get_comprehensive_stock_info"}:
+        return "yahoo"
+    if tool_name.startswith("get_job_") or tool_name in {"list_jobs", "trigger_job", "toggle_job", "run_pipeline_health_check"}:
+        return "pipeline"
+    if "wheel" in tool_name:
+        return "wheel_engine"
+    if "event" in tool_name:
+        return "event_store"
+    if "option" in tool_name:
+        return "options_cache"
+    if "local" in tool_name or "earnings" in tool_name:
+        return "local_db"
+    if tool_name in {"describe_tool", "help_tool", "get_server_health", "get_server_metrics"}:
+        return "system"
+    return "mixed"
+
+
+def _normalize_tool_result(result: Any) -> Dict[str, Any]:
+    if isinstance(result, dict):
+        known = {"success", "data", "error", "meta"}
+        normalized = {
+            "success": bool(result.get("success", True)),
+            "data": result.get("data"),
+            "error": _normalize_error(result.get("error")),
+            "meta": result.get("meta") if isinstance(result.get("meta"), dict) else {},
+        }
+        for k, v in result.items():
+            if k not in known:
+                normalized[k] = v
+        if "data" not in result and normalized["success"]:
+            normalized["data"] = {
+                k: v for k, v in result.items() if k not in {"success", "error", "meta"}
+            }
+        return normalized
+
+    return {
+        "success": True,
+        "data": result,
+        "error": _normalize_error(None),
+        "meta": {},
+    }
+
+
+def _record_metrics(tool_name: str, source: str, success: bool, latency_ms: float) -> None:
+    TOOL_METRICS["requests_total"] += 1
+    TOOL_METRICS["latency_ms_total"] += latency_ms
+    TOOL_METRICS["tool_calls"][tool_name] = TOOL_METRICS["tool_calls"].get(tool_name, 0) + 1
+    TOOL_METRICS["source_calls"][source] = TOOL_METRICS["source_calls"].get(source, 0) + 1
+    if not success:
+        TOOL_METRICS["failures_total"] += 1
+        TOOL_METRICS["tool_failures"][tool_name] = TOOL_METRICS["tool_failures"].get(tool_name, 0) + 1
+        TOOL_METRICS["source_failures"][source] = TOOL_METRICS["source_failures"].get(source, 0) + 1
+
+
+def _prometheus_metrics() -> str:
+    requests_total = TOOL_METRICS["requests_total"]
+    failures_total = TOOL_METRICS["failures_total"]
+    avg_latency = (
+        TOOL_METRICS["latency_ms_total"] / requests_total if requests_total else 0.0
+    )
+    lines = [
+        "# HELP mcp_requests_total Total tool requests",
+        "# TYPE mcp_requests_total counter",
+        f"mcp_requests_total {requests_total}",
+        "# HELP mcp_failures_total Total failed tool requests",
+        "# TYPE mcp_failures_total counter",
+        f"mcp_failures_total {failures_total}",
+        "# HELP mcp_latency_avg_ms Average tool latency in ms",
+        "# TYPE mcp_latency_avg_ms gauge",
+        f"mcp_latency_avg_ms {avg_latency:.4f}",
+    ]
+    for name, count in sorted(TOOL_METRICS["tool_calls"].items()):
+        lines.append(f'mcp_tool_calls_total{{tool="{name}"}} {count}')
+    for name, count in sorted(TOOL_METRICS["tool_failures"].items()):
+        lines.append(f'mcp_tool_failures_total{{tool="{name}"}} {count}')
+    return "\n".join(lines) + "\n"
+
+
+def _validate_historical_params(duration: str, bar_size: str) -> None:
+    payload = _model_validate(HistoricalDataInput, {"duration": duration, "bar_size": bar_size})
+    if payload.duration not in ALLOWED_HISTORICAL_DURATIONS:
+        raise ValueError(
+            f"Invalid duration '{payload.duration}'. Allowed: {sorted(ALLOWED_HISTORICAL_DURATIONS)}"
+        )
+    if payload.bar_size not in ALLOWED_HISTORICAL_BAR_SIZES:
+        raise ValueError(
+            f"Invalid bar_size '{payload.bar_size}'. Allowed: {sorted(ALLOWED_HISTORICAL_BAR_SIZES)}"
+        )
+
+
+def _validate_option_greeks_params(last_trade_date: str, right: str) -> None:
+    payload = _model_validate(
+        OptionGreeksInput, {"last_trade_date": last_trade_date, "right": right}
+    )
+    if len(payload.last_trade_date) != 8 or not payload.last_trade_date.isdigit():
+        raise ValueError("last_trade_date must be in YYYYMMDD format")
+    if payload.right.upper() not in ALLOWED_OPTION_RIGHTS:
+        raise ValueError("right must be 'C' or 'P'")
+
+
+def _validate_option_screener_params(right: Optional[str], limit: int) -> None:
+    payload = _model_validate(OptionScreenerInput, {"right": right, "limit": limit})
+    if payload.right:
+        normalized = payload.right.upper()
+        if normalized in {"CALL", "PUT"}:
+            normalized = normalized[0]
+        if normalized not in ALLOWED_OPTION_RIGHTS:
+            raise ValueError("right must be 'C', 'P', 'CALL', 'PUT' or null")
+    if payload.limit < 1 or payload.limit > 500:
+        raise ValueError("limit must be between 1 and 500")
+
+
+def _model_validate(model_cls: type[BaseModel], payload: Dict[str, Any]) -> BaseModel:
+    model_validate = getattr(model_cls, "model_validate", None)
+    if callable(model_validate):
+        return model_validate(payload)
+    return model_cls.parse_obj(payload)
+
+
+def _model_schema(model_cls: type[BaseModel]) -> Dict[str, Any]:
+    model_json_schema = getattr(model_cls, "model_json_schema", None)
+    if callable(model_json_schema):
+        return model_json_schema()
+    return model_cls.schema()
+
+
+def tool_endpoint(source: Optional[str] = None):
+    def decorator(func: Callable[..., Any]):
+        tool_name = func.__name__
+        tool_source = source or _infer_source(tool_name)
+
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            request_id = uuid.uuid4().hex
+            started = time.perf_counter()
+
+            if not _is_tool_allowed(tool_name):
+                response = {
+                    "success": False,
+                    "data": None,
+                    "error": {
+                        "code": "tool_not_allowed",
+                        "message": f"Tool '{tool_name}' is not allowed by MCP_TOOL_ALLOWLIST.",
+                        "details": {"allowlist": sorted(MCP_TOOL_ALLOWLIST)},
+                    },
+                    "meta": {},
+                }
+            elif CIRCUIT_BREAKER.is_open(tool_source):
+                response = {
+                    "success": False,
+                    "data": None,
+                    "error": {
+                        "code": "circuit_open",
+                        "message": f"Upstream source '{tool_source}' is temporarily open-circuited.",
+                        "details": {"retry_after_seconds": CB_COOLDOWN_SECONDS},
+                    },
+                    "meta": {},
+                }
+            else:
+                try:
+                    raw = await func(*args, **kwargs)
+                    response = _normalize_tool_result(raw)
+                except ValueError as exc:
+                    response = {
+                        "success": False,
+                        "data": None,
+                        "error": _normalize_error(
+                            {
+                                "code": "validation_error",
+                                "message": str(exc),
+                                "details": None,
+                            }
+                        ),
+                        "meta": {},
+                    }
+                except Exception as exc:
+                    logger.exception("[TOOL_ERROR] %s failed", tool_name)
+                    response = {
+                        "success": False,
+                        "data": None,
+                        "error": _normalize_error(
+                            {
+                                "code": "internal_error",
+                                "message": str(exc),
+                                "details": {"exception_type": type(exc).__name__},
+                            }
+                        ),
+                        "meta": {},
+                    }
+
+            latency_ms = round((time.perf_counter() - started) * 1000.0, 3)
+            response["error"] = _normalize_error(response.get("error"))
+            response_meta = response.get("meta", {}) or {}
+            response["meta"] = {
+                **response_meta,
+                "request_id": request_id,
+                "source": response_meta.get("source") or tool_source,
+                "asof": response_meta.get("asof") or _safe_iso_utc_now(),
+                "cache_ttl": response_meta.get("cache_ttl"),
+                "default_market": DEFAULT_MARKET,
+                "market_timezone": DEFAULT_MARKET_TIMEZONE,
+                "transport": MCP_TRANSPORT,
+                "ib_enabled": IB_ENABLED,
+                "latency_ms": latency_ms,
+            }
+
+            tracked_sources = {"ibkr", "yahoo", "options_cache", "mixed"}
+            error_code = response["error"]["code"]
+            if tool_source in tracked_sources:
+                if response["success"]:
+                    CIRCUIT_BREAKER.on_success(tool_source)
+                elif error_code not in {"tool_not_allowed", "circuit_open", "validation_error"}:
+                    CIRCUIT_BREAKER.on_failure(tool_source, response["error"]["message"] or "unknown")
+
+            _record_metrics(tool_name, tool_source, response["success"], latency_ms)
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "tool_call",
+                        "tool": tool_name,
+                        "success": response["success"],
+                        "source": tool_source,
+                        "request_id": request_id,
+                        "latency_ms": latency_ms,
+                    }
+                )
+            )
+            return response
+
+        wrapper.__is_finance_tool__ = True
+        wrapper.__tool_source__ = tool_source
+        TOOL_REGISTRY[tool_name] = wrapper
+        return wrapper
+
+    return decorator
+
+
 @mcp.tool()
+@tool_endpoint()
 async def get_market_capabilities() -> Dict[str, Any]:
     """
     Lista as capacidades do servidor financeiro por categoria, incluindo metodos e exemplos de perguntas.
@@ -140,17 +551,136 @@ async def get_market_capabilities() -> Dict[str, Any]:
     - "quais metodos existem para mercado/opcoes/wheel?"
     """
     return {
-        "success": True,
-        "default_market": "sweden",
-        "categories": MARKET_CAPABILITIES,
-        "usage_hint": "Escolha uma categoria e use os methods sugeridos; para duvidas gerais, comece por stock_screener, wheel_strategy e event_calendar.",
+        "data": {
+            "default_market": DEFAULT_MARKET,
+            "market_timezone": DEFAULT_MARKET_TIMEZONE,
+            "profiles": {
+                "yahoo_only": {"ib_enabled": False, "description": "Fundamentals, screeners, eventos e analytics sem conexao IBKR."},
+                "ibkr_plus_yahoo": {"ib_enabled": True, "description": "Real-time IBKR + Yahoo + cache local."},
+            },
+            "categories": MARKET_CAPABILITIES,
+            "usage_hint": "Escolha uma categoria e use os methods sugeridos; para duvidas gerais, comece por stock_screener, wheel_strategy e event_calendar.",
+        }
     }
+
+
+@mcp.tool()
+@tool_endpoint(source="system")
+async def describe_tool(tool_name: str) -> Dict[str, Any]:
+    """Describe tool parameters, defaults, and examples for MCP clients."""
+    fn = TOOL_REGISTRY.get(tool_name)
+    if not fn:
+        return {
+            "success": False,
+            "error": {
+                "code": "tool_not_found",
+                "message": f"Tool '{tool_name}' not found.",
+                "details": {"available_count": len(TOOL_REGISTRY)},
+            },
+        }
+
+    signature = inspect.signature(fn)
+    parameters = []
+    for name, param in signature.parameters.items():
+        if name in {"args", "kwargs"}:
+            continue
+        default = None if param.default is inspect.Signature.empty else param.default
+        required = param.default is inspect.Signature.empty
+        parameters.append(
+            {
+                "name": name,
+                "type": _annotation_to_string(param.annotation),
+                "required": required,
+                "default": default,
+            }
+        )
+
+    examples: List[str] = []
+    category = None
+    for capability in MARKET_CAPABILITIES:
+        if tool_name in capability.get("methods", []):
+            category = capability["category"]
+            examples = capability.get("examples", [])
+            break
+
+    model_cls = TOOL_INPUT_MODELS.get(tool_name)
+    validation_schema = _model_schema(model_cls) if model_cls else None
+
+    return {
+        "data": {
+            "name": tool_name,
+            "category": category,
+            "source": getattr(fn, "__tool_source__", _infer_source(tool_name)),
+            "doc": (fn.__doc__ or "").strip(),
+            "parameters": parameters,
+            "validation_schema": validation_schema,
+            "examples": examples,
+        }
+    }
+
+
+@mcp.tool()
+@tool_endpoint(source="system")
+async def help_tool(tool_name: str) -> Dict[str, Any]:
+    """Alias for describe_tool(tool_name), useful for MCP clients that ask for 'help'."""
+    return await describe_tool(tool_name)
+
+
+@mcp.tool()
+@tool_endpoint(source="system")
+async def get_server_health() -> Dict[str, Any]:
+    """Server operational health summary equivalent to /health."""
+    ib_health = await ib_conn.check_health()
+    ib_status = ib_health.get("status")
+    status = "ok"
+    if ib_status == "degraded":
+        status = "degraded"
+    if ib_status == "disconnected" and IB_ENABLED:
+        status = "degraded"
+    return {
+        "data": {
+            "status": status,
+            "ib": ib_health,
+            "runtime": {
+                "transport": MCP_TRANSPORT,
+                "ib_enabled": IB_ENABLED,
+                "default_market": DEFAULT_MARKET,
+                "market_timezone": DEFAULT_MARKET_TIMEZONE,
+            },
+            "circuit_breaker": CIRCUIT_BREAKER.snapshot(),
+        }
+    }
+
+
+@mcp.tool()
+@tool_endpoint(source="system")
+async def get_server_metrics(output_format: str = "json") -> Dict[str, Any]:
+    """Server metrics equivalent to /metrics (json or prometheus text)."""
+    metrics_payload = {
+        "requests_total": TOOL_METRICS["requests_total"],
+        "failures_total": TOOL_METRICS["failures_total"],
+        "latency_avg_ms": (
+            TOOL_METRICS["latency_ms_total"] / TOOL_METRICS["requests_total"]
+            if TOOL_METRICS["requests_total"]
+            else 0.0
+        ),
+        "tool_calls": TOOL_METRICS["tool_calls"],
+        "tool_failures": TOOL_METRICS["tool_failures"],
+        "source_calls": TOOL_METRICS["source_calls"],
+        "source_failures": TOOL_METRICS["source_failures"],
+        "circuit_breaker": CIRCUIT_BREAKER.snapshot(),
+        "connection": ib_conn.runtime_metrics(),
+    }
+    if output_format.lower() == "prometheus":
+        return {"data": {"format": "prometheus", "payload": _prometheus_metrics()}}
+    return {"data": {"format": "json", "payload": metrics_payload}}
 
 # ============================================================================
 # IBKR Tools (Real-time, Priority)
 # ============================================================================
 
 @mcp.tool()
+@tool_endpoint()
 @require_connection
 async def get_stock_price(symbol: str, exchange: str = None, currency: str = 'USD') -> Dict[str, Any]:
     """
@@ -176,6 +706,7 @@ async def get_stock_price(symbol: str, exchange: str = None, currency: str = 'US
 
 
 @mcp.tool()
+@tool_endpoint()
 @require_connection
 async def get_historical_data(symbol: str, duration: str = "1 D", bar_size: str = "1 hour",
                               exchange: str = None, currency: str = "USD") -> Dict[str, Any]:
@@ -196,10 +727,12 @@ async def get_historical_data(symbol: str, duration: str = "1 D", bar_size: str 
 
     Example: get_historical_data("AAPL", "1 M", "1 day")
     """
+    _validate_historical_params(duration, bar_size)
     return await HistoryService.get_historical_data(symbol, duration, bar_size, exchange, currency)
 
 
 @mcp.tool()
+@tool_endpoint()
 @require_connection
 async def search_symbol(query: str) -> Dict[str, Any]:
     """
@@ -220,22 +753,51 @@ async def search_symbol(query: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
+@tool_endpoint()
 @require_connection
-async def get_account_summary() -> Dict[str, Any]:
+async def get_account_summary(masked: bool = True) -> Dict[str, Any]:
     """
     Get account summary with balances and margin from Interactive Brokers.
 
     Includes: NetLiquidation, BuyingPower, TotalCashValue, Margin Requirements,
     AvailableFunds, ExcessLiquidity, and Cushion.
 
+    Parameters:
+        masked: True by default. Returns bucketed/masked monetary values to avoid leaking sensitive balances.
+                Set False only in trusted local environments.
+
     Returns: {"success": true, "data": {"NetLiquidation": {"value": "100000", "currency": "USD"}, "MaintMarginReq": {"value": "5000", "currency": "USD"}, ...}}
 
     Example: get_account_summary()
     """
-    return await AccountService.get_summary()
+    result = await AccountService.get_summary()
+    if not result.get("success"):
+        return result
+    if not masked:
+        return result
+
+    data = result.get("data", {}) or {}
+    masked: Dict[str, Any] = {}
+    for key, payload in data.items():
+        value = payload.get("value") if isinstance(payload, dict) else None
+        currency = payload.get("currency") if isinstance(payload, dict) else None
+        if value is None:
+            masked[key] = payload
+            continue
+        try:
+            numeric = float(value)
+            masked[key] = {
+                "value": round(numeric, 2),
+                "masked_value": f"{int(round(numeric / 1000.0) * 1000)}+",
+                "currency": currency,
+            }
+        except Exception:
+            masked[key] = {"value": value, "currency": currency}
+    return {"success": True, "data": masked, "meta": {"masked": True}}
 
 
 @mcp.tool()
+@tool_endpoint()
 @require_connection
 async def get_option_chain(symbol: str) -> Dict[str, Any]:
     """
@@ -254,6 +816,7 @@ async def get_option_chain(symbol: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
+@tool_endpoint()
 @require_connection
 async def get_option_greeks(symbol: str, last_trade_date: str, strike: float, right: str) -> Dict[str, Any]:
     """
@@ -271,7 +834,8 @@ async def get_option_greeks(symbol: str, last_trade_date: str, strike: float, ri
 
     Example: get_option_greeks("AAPL", "20240119", 150.0, "C")
     """
-    return await OptionService.get_option_greeks(symbol, last_trade_date, strike, right)
+    _validate_option_greeks_params(last_trade_date, right)
+    return await OptionService.get_option_greeks(symbol, last_trade_date, strike, right.upper())
 
 
 # ============================================================================
@@ -279,6 +843,7 @@ async def get_option_greeks(symbol: str, last_trade_date: str, strike: float, ri
 # ============================================================================
 
 @mcp.tool()
+@tool_endpoint()
 async def get_fundamentals(symbol: str) -> Dict[str, Any]:
     """
     Get fundamental analysis data from Yahoo Finance: PE ratio, EPS, market cap, revenue, margins, and more.
@@ -296,6 +861,7 @@ async def get_fundamentals(symbol: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
+@tool_endpoint()
 async def get_dividends(symbol: str) -> Dict[str, Any]:
     """
     Get dividend information from Yahoo Finance: yield, rate, payout ratio, and payment history.
@@ -313,9 +879,10 @@ async def get_dividends(symbol: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
+@tool_endpoint()
 async def get_company_info(symbol: str) -> Dict[str, Any]:
     """
-    Get company profile from Yahoo Finance: sector, industry, description, employees, website.
+    Get company profile from local database cache: sector, industry, description, employees, website.
 
     Use this to understand what a company does before analyzing its stock.
 
@@ -330,23 +897,27 @@ async def get_company_info(symbol: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
-async def get_financial_statements(symbol: str) -> Dict[str, Any]:
+@tool_endpoint()
+async def get_financial_statements(symbol: str, statement_type: str = "all") -> Dict[str, Any]:
     """
-    Get annual financial statements from Yahoo Finance: Income Statement, Balance Sheet, Cash Flow.
+    Get cached financial statements (Income Statement, Balance Sheet, Cash Flow) from local database.
 
-    Use this for deep financial analysis and comparing across periods.
+    Data is loaded by ETL (Load Market Intelligence) and served locally at runtime.
 
     Parameters:
         symbol: Yahoo Finance ticker. Use suffix for international: 'AAPL', 'PETR4.SA'
+        statement_type: 'all', 'income', 'balance', 'cashflow',
+                        'quarterly_income', 'quarterly_balance', 'quarterly_cashflow'
 
-    Returns: {"success": true, "data": {"income_statement": [...], "balance_sheet": [...], "cash_flow": [...]}}
+    Returns: cached statements from local database snapshot.
 
-    Example: get_financial_statements("MSFT")
+    Example: get_financial_statements("MSFT", "all")
     """
-    return YahooService.get_financial_statements(symbol)
+    return MarketIntelligenceService.get_financial_statements(symbol, statement_type)
 
 
 @mcp.tool()
+@tool_endpoint()
 async def get_exchange_info(symbol: str) -> Dict[str, Any]:
     """
     Get exchange information for a ticker from Yahoo Finance: timezone, market hours, market state.
@@ -364,6 +935,7 @@ async def get_exchange_info(symbol: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
+@tool_endpoint()
 async def yahoo_search(query: str) -> Dict[str, Any]:
     """
     Search for tickers by company name, sector, or keyword using Yahoo Finance.
@@ -381,11 +953,97 @@ async def yahoo_search(query: str) -> Dict[str, Any]:
     return YahooService.search_tickers(query)
 
 
+@mcp.tool()
+@tool_endpoint()
+async def get_comprehensive_stock_info(symbol: str) -> Dict[str, Any]:
+    """
+    Get comprehensive stock information from local cached tables/snapshots.
+
+    Includes company profile, market data, fundamentals, dividends, earnings
+    and analyst target/recommendation context.
+    """
+    return MarketIntelligenceService.get_comprehensive_stock_info(symbol)
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_historical_data_cached(symbol: str, period: str = "1y", interval: str = "1d") -> Dict[str, Any]:
+    """
+    Get cached historical price data from local database.
+    Supports intervals: 1d, 1wk, 1mo.
+    """
+    return MarketIntelligenceService.get_historical_data_cached(symbol, period, interval)
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_options_data(symbol: str, expiration_date: str = None) -> Dict[str, Any]:
+    """
+    Get local cached options chain grouped by expiration date.
+    """
+    return MarketIntelligenceService.get_options_data(symbol, expiration_date)
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_institutional_holders(symbol: str, limit: int = 50) -> Dict[str, Any]:
+    """
+    Get local cached institutional and major holder data.
+    """
+    return MarketIntelligenceService.get_institutional_holders(symbol, limit)
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_analyst_recommendations(symbol: str, limit: int = 50) -> Dict[str, Any]:
+    """
+    Get local cached analyst recommendations and upgrades/downgrades.
+    """
+    return MarketIntelligenceService.get_analyst_recommendations(symbol, limit)
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_news(symbol: str, limit: int = 10) -> Dict[str, Any]:
+    """
+    Get local cached news headlines for a stock.
+    """
+    return MarketIntelligenceService.get_news(symbol, limit)
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_technical_analysis(symbol: str, period: str = "1y") -> Dict[str, Any]:
+    """
+    Get local technical analysis (SMA/EMA/RSI/MACD/Bollinger/volume/support-resistance).
+    """
+    return MarketIntelligenceService.get_technical_analysis(symbol, period)
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_sector_performance(symbols: List[str]) -> Dict[str, Any]:
+    """
+    Compare local performance metrics across a list of symbols.
+    """
+    return MarketIntelligenceService.get_sector_performance(symbols)
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_dividend_history(symbol: str, period: str = "2y") -> Dict[str, Any]:
+    """
+    Get local dividend history with summary metrics for a period.
+    """
+    return MarketIntelligenceService.get_dividend_history(symbol, period)
+
+
 # ============================================================================
 # Stock Screener Tools
 # ============================================================================
 
 @mcp.tool()
+@tool_endpoint()
 async def get_stock_screener(market: str = "sweden", sector: str = None,
                              sort_by: str = "perf_1d", limit: int = 50) -> Dict[str, Any]:
     """
@@ -404,6 +1062,7 @@ async def get_stock_screener(market: str = "sweden", sector: str = None,
 
 
 @mcp.tool()
+@tool_endpoint()
 async def get_top_gainers(market: str = "sweden", period: str = "1D", limit: int = 10) -> Dict[str, Any]:
     """
     Get top performing stocks (biggest gains) by market and period.
@@ -419,6 +1078,7 @@ async def get_top_gainers(market: str = "sweden", period: str = "1D", limit: int
 
 
 @mcp.tool()
+@tool_endpoint()
 async def get_top_losers(market: str = "sweden", period: str = "1D", limit: int = 10) -> Dict[str, Any]:
     """
     Get worst performing stocks (biggest drops) by market and period.
@@ -434,6 +1094,7 @@ async def get_top_losers(market: str = "sweden", period: str = "1D", limit: int 
 
 
 @mcp.tool()
+@tool_endpoint()
 async def get_top_dividend_payers(market: str = "sweden", sector: str = None,
                                   limit: int = 10) -> Dict[str, Any]:
     """
@@ -450,6 +1111,7 @@ async def get_top_dividend_payers(market: str = "sweden", sector: str = None,
 
 
 @mcp.tool()
+@tool_endpoint()
 async def get_technical_signals(market: str = "sweden", signal_type: str = "oversold",
                                 limit: int = 20) -> Dict[str, Any]:
     """
@@ -472,6 +1134,7 @@ async def get_technical_signals(market: str = "sweden", signal_type: str = "over
 
 
 @mcp.tool()
+@tool_endpoint()
 async def get_highest_rsi(market: str = "sweden", limit: int = 10) -> Dict[str, Any]:
     """
     Get stocks with highest RSI values for the latest available metrics date.
@@ -484,6 +1147,7 @@ async def get_highest_rsi(market: str = "sweden", limit: int = 10) -> Dict[str, 
 
 
 @mcp.tool()
+@tool_endpoint()
 async def get_lowest_rsi(market: str = "sweden", limit: int = 10) -> Dict[str, Any]:
     """
     Get stocks with lowest RSI values for the latest available metrics date.
@@ -496,6 +1160,7 @@ async def get_lowest_rsi(market: str = "sweden", limit: int = 10) -> Dict[str, A
 
 
 @mcp.tool()
+@tool_endpoint()
 async def get_most_active_stocks(market: str = "sweden", period: str = "1D", limit: int = 10) -> Dict[str, Any]:
     """
     Get most active stocks by market mover cache.
@@ -509,6 +1174,7 @@ async def get_most_active_stocks(market: str = "sweden", period: str = "1D", lim
 
 
 @mcp.tool()
+@tool_endpoint()
 async def get_fundamental_rankings(market: str = "sweden", metric: str = "market_cap",
                                    limit: int = 10, sector: str = None) -> Dict[str, Any]:
     """
@@ -529,6 +1195,7 @@ async def get_fundamental_rankings(market: str = "sweden", metric: str = "market
 # ============================================================================
 
 @mcp.tool()
+@tool_endpoint()
 async def get_companies_by_sector(market: str = "sweden", sector: str = None, industry: str = None,
                                   subindustry: str = None, limit: int = 50) -> Dict[str, Any]:
     """
@@ -547,6 +1214,7 @@ async def get_companies_by_sector(market: str = "sweden", sector: str = None, in
 
 
 @mcp.tool()
+@tool_endpoint()
 async def get_company_core_business(symbol: str) -> Dict[str, Any]:
     """
     Return enriched company profile with 'core business' summary.
@@ -558,6 +1226,7 @@ async def get_company_core_business(symbol: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
+@tool_endpoint()
 async def get_earnings_events(symbol: str = None, market: str = "sweden",
                               upcoming_only: bool = False, limit: int = 20) -> Dict[str, Any]:
     """
@@ -579,6 +1248,7 @@ async def get_earnings_events(symbol: str = None, market: str = "sweden",
 # ============================================================================
 
 @mcp.tool()
+@tool_endpoint()
 async def get_option_screener(symbol: str = None, expiry: str = None, 
                              right: str = None, min_delta: float = None, 
                              max_delta: float = None, min_iv: float = None,
@@ -601,12 +1271,20 @@ async def get_option_screener(symbol: str = None, expiry: str = None,
         has_liquidity: Filter for options with active quotes
         limit: Max results (default 50)
     """
+    _validate_option_screener_params(right, limit)
+    normalized_right = right.upper() if right else None
+    if normalized_right == "CALL":
+        normalized_right = "C"
+    if normalized_right == "PUT":
+        normalized_right = "P"
+
     return OptionScreenerService.get_option_screener(
-        symbol, expiry, right, min_delta, max_delta, min_iv, max_iv, has_liquidity, limit
+        symbol, expiry, normalized_right, min_delta, max_delta, min_iv, max_iv, has_liquidity, limit
     )
 
 
 @mcp.tool()
+@tool_endpoint()
 async def get_option_chain_snapshot(symbol: str, expiry: str = None) -> Dict[str, Any]:
     """
     Get the latest cached option chain for a symbol and optional expiry.
@@ -624,6 +1302,7 @@ async def get_option_chain_snapshot(symbol: str, expiry: str = None) -> Dict[str
 # ============================================================================
 
 @mcp.tool()
+@tool_endpoint()
 async def get_wheel_put_candidates(symbol: str, market: str = "sweden",
                                    delta_min: float = 0.25, delta_max: float = 0.35,
                                    dte_min: int = 4, dte_max: int = 10,
@@ -646,6 +1325,7 @@ async def get_wheel_put_candidates(symbol: str, market: str = "sweden",
 
 
 @mcp.tool()
+@tool_endpoint()
 async def get_wheel_put_annualized_return(symbol: str, market: str = "sweden",
                                           target_dte: int = 7) -> Dict[str, Any]:
     """
@@ -661,6 +1341,7 @@ async def get_wheel_put_annualized_return(symbol: str, market: str = "sweden",
 
 
 @mcp.tool()
+@tool_endpoint()
 async def get_wheel_contract_capacity(symbol: str, capital_sek: float, market: str = "sweden",
                                       strike: float = None, margin_requirement_pct: float = 1.0,
                                       cash_buffer_pct: float = 0.0, target_dte: int = 7) -> Dict[str, Any]:
@@ -682,6 +1363,7 @@ async def get_wheel_contract_capacity(symbol: str, capital_sek: float, market: s
 
 
 @mcp.tool()
+@tool_endpoint()
 async def analyze_wheel_put_risk(symbol: str, market: str = "sweden",
                                  pct_below_spot: float = 5.0, target_dte: int = 7) -> Dict[str, Any]:
     """
@@ -694,6 +1376,7 @@ async def analyze_wheel_put_risk(symbol: str, market: str = "sweden",
 
 
 @mcp.tool()
+@tool_endpoint()
 async def get_wheel_assignment_plan(symbol: str, assignment_strike: float, premium_received: float,
                                     market: str = "sweden") -> Dict[str, Any]:
     """
@@ -709,6 +1392,7 @@ async def get_wheel_assignment_plan(symbol: str, assignment_strike: float, premi
 
 
 @mcp.tool()
+@tool_endpoint()
 async def get_wheel_covered_call_candidates(symbol: str, average_cost: float, market: str = "sweden",
                                             delta_min: float = 0.25, delta_max: float = 0.35,
                                             dte_min: int = 4, dte_max: int = 21,
@@ -731,6 +1415,7 @@ async def get_wheel_covered_call_candidates(symbol: str, average_cost: float, ma
 
 
 @mcp.tool()
+@tool_endpoint()
 async def compare_wheel_premiums(symbol_a: str, symbol_b: str, market: str = "sweden",
                                  delta_min: float = 0.25, delta_max: float = 0.35,
                                  dte_min: int = 4, dte_max: int = 10) -> Dict[str, Any]:
@@ -749,6 +1434,7 @@ async def compare_wheel_premiums(symbol_a: str, symbol_b: str, market: str = "sw
 
 
 @mcp.tool()
+@tool_endpoint()
 async def evaluate_wheel_iv(symbol: str, market: str = "sweden", lookback_days: int = 90,
                             high_iv_threshold_percentile: float = 70.0, target_dte: int = 7) -> Dict[str, Any]:
     """
@@ -765,6 +1451,7 @@ async def evaluate_wheel_iv(symbol: str, market: str = "sweden", lookback_days: 
 
 
 @mcp.tool()
+@tool_endpoint()
 async def simulate_wheel_drawdown(symbol: str, strike: float, premium_received: float,
                                   drop_percent: float = 10.0, market: str = "sweden") -> Dict[str, Any]:
     """
@@ -780,6 +1467,7 @@ async def simulate_wheel_drawdown(symbol: str, strike: float, premium_received: 
 
 
 @mcp.tool()
+@tool_endpoint()
 async def compare_wheel_start_timing(symbol: str, market: str = "sweden",
                                      wait_drop_percent: float = 3.0,
                                      delta_min: float = 0.25, delta_max: float = 0.35,
@@ -800,6 +1488,7 @@ async def compare_wheel_start_timing(symbol: str, market: str = "sweden",
 
 
 @mcp.tool()
+@tool_endpoint()
 async def build_wheel_multi_stock_plan(capital_sek: float, symbols: List[str] = None,
                                        market: str = "sweden",
                                        delta_min: float = 0.25, delta_max: float = 0.35,
@@ -823,6 +1512,7 @@ async def build_wheel_multi_stock_plan(capital_sek: float, symbols: List[str] = 
 
 
 @mcp.tool()
+@tool_endpoint()
 async def stress_test_wheel_portfolio(capital_sek: float, sector_drop_percent: float = 20.0,
                                       symbols: List[str] = None, market: str = "sweden",
                                       delta_min: float = 0.25, delta_max: float = 0.35,
@@ -847,6 +1537,7 @@ async def stress_test_wheel_portfolio(capital_sek: float, sector_drop_percent: f
 # ============================================================================
 
 @mcp.tool()
+@tool_endpoint()
 async def get_event_calendar(market: str = "sweden", category: str = None, event_type: str = None,
                              ticker: str = None, start_date: str = None, end_date: str = None,
                              min_volatility_impact: str = "low", limit: int = 50) -> Dict[str, Any]:
@@ -867,6 +1558,7 @@ async def get_event_calendar(market: str = "sweden", category: str = None, event
 
 
 @mcp.tool()
+@tool_endpoint()
 async def get_corporate_events(market: str = "sweden", ticker: str = None,
                                start_date: str = None, end_date: str = None,
                                min_volatility_impact: str = "low", limit: int = 50) -> Dict[str, Any]:
@@ -883,6 +1575,7 @@ async def get_corporate_events(market: str = "sweden", ticker: str = None,
 
 
 @mcp.tool()
+@tool_endpoint()
 async def get_macro_events(market: str = "sweden", start_date: str = None, end_date: str = None,
                            min_volatility_impact: str = "low", limit: int = 50) -> Dict[str, Any]:
     """Macro calendar events (CPI, PPI, GDP, unemployment, PMI, etc)."""
@@ -897,6 +1590,7 @@ async def get_macro_events(market: str = "sweden", start_date: str = None, end_d
 
 
 @mcp.tool()
+@tool_endpoint()
 async def get_monetary_policy_events(market: str = "sweden", start_date: str = None, end_date: str = None,
                                      min_volatility_impact: str = "low", limit: int = 50) -> Dict[str, Any]:
     """Central bank policy events (FOMC/ECB/Riksbank meetings, rate decisions, minutes)."""
@@ -911,6 +1605,7 @@ async def get_monetary_policy_events(market: str = "sweden", start_date: str = N
 
 
 @mcp.tool()
+@tool_endpoint()
 async def get_geopolitical_events(market: str = "sweden", start_date: str = None, end_date: str = None,
                                   min_volatility_impact: str = "low", limit: int = 50) -> Dict[str, Any]:
     """Geopolitical events (sanctions, elections, energy crisis, OPEC, etc)."""
@@ -925,6 +1620,7 @@ async def get_geopolitical_events(market: str = "sweden", start_date: str = None
 
 
 @mcp.tool()
+@tool_endpoint()
 async def get_market_structure_events(market: str = "sweden", start_date: str = None, end_date: str = None,
                                       min_volatility_impact: str = "low", limit: int = 50) -> Dict[str, Any]:
     """Market structure events (index rebalance, option expiration, triple witching, ETF rebalance)."""
@@ -939,6 +1635,7 @@ async def get_market_structure_events(market: str = "sweden", start_date: str = 
 
 
 @mcp.tool()
+@tool_endpoint()
 async def get_wheel_event_risk_window(ticker: str, market: str = "sweden",
                                       days_ahead: int = 14, limit: int = 100) -> Dict[str, Any]:
     """
@@ -955,6 +1652,7 @@ async def get_wheel_event_risk_window(ticker: str, market: str = "sweden",
 # ============================================================================
 
 @mcp.tool()
+@tool_endpoint()
 async def list_jobs() -> Dict[str, Any]:
     """
     List all data loader jobs with their schedule, status, and last run info.
@@ -966,6 +1664,7 @@ async def list_jobs() -> Dict[str, Any]:
 
 
 @mcp.tool()
+@tool_endpoint()
 async def get_job_logs(job_name: str, limit: int = 5) -> Dict[str, Any]:
     """
     Get recent execution logs for a specific data loader job.
@@ -981,6 +1680,7 @@ async def get_job_logs(job_name: str, limit: int = 5) -> Dict[str, Any]:
 
 
 @mcp.tool()
+@tool_endpoint()
 async def trigger_job(job_name: str) -> Dict[str, Any]:
     """
     Manually trigger a data loader job to run immediately.
@@ -995,6 +1695,7 @@ async def trigger_job(job_name: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
+@tool_endpoint()
 async def toggle_job(job_name: str, active: bool) -> Dict[str, Any]:
     """
     Enable or disable a scheduled job.
@@ -1009,6 +1710,7 @@ async def toggle_job(job_name: str, active: bool) -> Dict[str, Any]:
 
 
 @mcp.tool()
+@tool_endpoint()
 async def get_job_status() -> Dict[str, Any]:
     """
     Get health overview of all data pipeline jobs.
@@ -1020,6 +1722,7 @@ async def get_job_status() -> Dict[str, Any]:
 
 
 @mcp.tool()
+@tool_endpoint()
 async def run_pipeline_health_check() -> Dict[str, Any]:
     """
     Trigger a lightweight health check across all data loader jobs.
@@ -1041,11 +1744,26 @@ async def resource_status() -> Dict[str, Any]:
     return await ib_conn.check_health()
 
 
+@mcp.resource("finance://health")
+async def resource_health() -> Dict[str, Any]:
+    """MCP resource equivalent of /health for external clients."""
+    health = await get_server_health()
+    return health.get("data", health)
+
+
+@mcp.resource("finance://metrics")
+async def resource_metrics() -> Dict[str, Any]:
+    """MCP resource equivalent of /metrics (JSON payload)."""
+    metrics = await get_server_metrics("json")
+    return metrics.get("data", metrics)
+
+
 @mcp.resource("finance://account/summary")
 @require_connection
 async def resource_account_summary() -> Dict[str, Any]:
-    """Get the account summary including margin and liquidity data."""
-    return await AccountService.get_summary()
+    """Get account summary with masked values by default."""
+    response = await get_account_summary(masked=True)
+    return response.get("data", response)
 
 
 @mcp.resource("finance://portfolio/positions")
@@ -1239,6 +1957,7 @@ Prefer intent-specific methods instead of generic mega-queries.
 # ============================================================================
 
 @mcp.tool()
+@tool_endpoint()
 async def get_earnings_history(symbol: str, limit: int = 10) -> Dict[str, Any]:
     """
     Get historical earnings data (EPS surprises) for a stock from the local database.
@@ -1278,6 +1997,7 @@ async def get_earnings_history(symbol: str, limit: int = 10) -> Dict[str, Any]:
 
 
 @mcp.tool()
+@tool_endpoint()
 async def get_earnings_calendar(symbol: str) -> Dict[str, Any]:
     """
     Get upcoming earnings date and analyst expectations for a stock.
@@ -1316,6 +2036,7 @@ async def get_earnings_calendar(symbol: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
+@tool_endpoint()
 async def query_local_stocks(country: str = None, sector: str = None) -> Dict[str, Any]:
     """
     List stocks available in the local database, optionally filtered.
@@ -1355,6 +2076,7 @@ async def query_local_stocks(country: str = None, sector: str = None) -> Dict[st
 
 
 @mcp.tool()
+@tool_endpoint()
 async def query_local_fundamentals(symbol: str) -> Dict[str, Any]:
     """
     Get the latest fundamental data from the local database.
@@ -1406,7 +2128,10 @@ async def query_local_fundamentals(symbol: str) -> Dict[str, Any]:
 # ============================================================================
 
 async def _startup():
-    """Initialize connection and start heartbeat."""
+    """Initialize optional IBKR connection and heartbeat."""
+    if not IB_ENABLED:
+        logger.warning("[SERVER] IB_ENABLED=false (Yahoo-only profile active).")
+        return
     await ib_conn.connect()
     await ib_conn.start_heartbeat()
 
@@ -1418,12 +2143,16 @@ def _handle_signal(sig, frame):
     loop.create_task(ib_conn.shutdown())
 
 
-if __name__ == "__main__":
+def main():
+    """CLI entrypoint for mcp-finance."""
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 
-    logger.info(f"[SERVER] Starting MCP Finance Server (transport={MCP_TRANSPORT}, host={MCP_HOST}, port={MCP_PORT})")
+    logger.info(
+        "[SERVER] Starting MCP Finance Server "
+        f"(transport={MCP_TRANSPORT}, host={MCP_HOST}, port={MCP_PORT}, ib_enabled={IB_ENABLED})"
+    )
     try:
         boot_loop = asyncio.get_event_loop()
         boot_loop.run_until_complete(_startup())
@@ -1435,6 +2164,11 @@ if __name__ == "__main__":
     finally:
         try:
             shutdown_loop = asyncio.get_event_loop()
-            shutdown_loop.run_until_complete(ib_conn.shutdown())
+            if IB_ENABLED:
+                shutdown_loop.run_until_complete(ib_conn.shutdown())
         except Exception:
             pass
+
+
+if __name__ == "__main__":
+    main()
