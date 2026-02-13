@@ -13,18 +13,66 @@ import Jobs from './pages/Jobs'
 import Schema from './pages/Schema'
 import DataBrowser from './pages/DataBrowser'
 
+const EMPTY_STATS = {
+    jobs: { active: 0, total: 0 },
+    runs: { success: 0, failed: 0, total: 0 },
+    data: { stocks: 0, prices: 0, dividends: 0, fundamentals: 0 },
+    next_runs: [],
+    recent_failures: [],
+}
+
+const normalizeStats = (payload) => {
+    if (!payload || typeof payload !== 'object') return null
+    if (!payload.jobs || !payload.runs || !payload.data) return null
+
+    return {
+        jobs: {
+            active: Number(payload.jobs.active ?? 0),
+            total: Number(payload.jobs.total ?? 0),
+        },
+        runs: {
+            success: Number(payload.runs.success ?? 0),
+            failed: Number(payload.runs.failed ?? 0),
+            total: Number(payload.runs.total ?? 0),
+        },
+        data: {
+            stocks: Number(payload.data.stocks ?? 0),
+            prices: Number(payload.data.prices ?? 0),
+            dividends: Number(payload.data.dividends ?? 0),
+            fundamentals: Number(payload.data.fundamentals ?? 0),
+        },
+        next_runs: Array.isArray(payload.next_runs) ? payload.next_runs : [],
+        recent_failures: Array.isArray(payload.recent_failures) ? payload.recent_failures : [],
+    }
+}
+
 const App = () => {
     const [activeTab, setActiveTab] = useState('dashboard')
     const [stats, setStats] = useState(null)
+    const [statsError, setStatsError] = useState(null)
 
     useEffect(() => {
         const fetchStats = async () => {
             try {
                 const res = await fetch('/api/stats')
-                const data = await res.json()
-                setStats(data)
+                const body = await res.json().catch(() => ({}))
+
+                if (!res.ok) {
+                    const reason = body?.detail || body?.error || `HTTP ${res.status}`
+                    throw new Error(reason)
+                }
+
+                const normalized = normalizeStats(body)
+                if (!normalized) {
+                    throw new Error('Invalid stats payload shape')
+                }
+
+                setStats(normalized)
+                setStatsError(null)
             } catch (err) {
                 console.error('Failed to fetch stats', err)
+                setStats(null)
+                setStatsError(err?.message || 'Failed to fetch stats')
             }
         }
         fetchStats()
@@ -83,7 +131,7 @@ const App = () => {
                 </header>
 
                 <div style={styles.content}>
-                    {activeTab === 'dashboard' && <Dashboard stats={stats} />}
+                    {activeTab === 'dashboard' && <Dashboard stats={stats || EMPTY_STATS} error={statsError} />}
                     {activeTab === 'jobs' && <Jobs />}
                     {activeTab === 'schema' && <Schema />}
                     {activeTab === 'data' && <DataBrowser />}

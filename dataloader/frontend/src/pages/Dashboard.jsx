@@ -8,18 +8,39 @@ import {
     Calendar
 } from 'lucide-react'
 
-const Dashboard = ({ stats }) => {
-    if (!stats) return <div style={styles.loading}>Loading statistics...</div>
+const Dashboard = ({ stats, error }) => {
+    const safeStats = {
+        jobs: {
+            active: Number(stats?.jobs?.active ?? 0),
+            total: Number(stats?.jobs?.total ?? 0),
+        },
+        runs: {
+            success: Number(stats?.runs?.success ?? 0),
+            total: Number(stats?.runs?.total ?? 0),
+            failed: Number(stats?.runs?.failed ?? 0),
+        },
+        data: {
+            stocks: Number(stats?.data?.stocks ?? 0),
+        },
+        next_runs: Array.isArray(stats?.next_runs) ? stats.next_runs : [],
+        recent_failures: Array.isArray(stats?.recent_failures) ? stats.recent_failures : [],
+    }
 
     const cards = [
-        { label: 'Active Jobs', value: stats.jobs.active, total: stats.jobs.total, icon: BarChart3, color: 'var(--primary)' },
-        { label: 'Successful Runs', value: stats.runs.success, total: stats.runs.total, icon: CheckCircle2, color: 'var(--success)' },
-        { label: 'Failed Runs', value: stats.runs.failed, icon: XCircle, color: 'var(--destructive)' },
-        { label: 'Total Stocks', value: stats.data.stocks, icon: Database, color: 'var(--accent)' },
+        { label: 'Active Jobs', value: safeStats.jobs.active, total: safeStats.jobs.total, icon: BarChart3, color: 'var(--primary)' },
+        { label: 'Successful Runs', value: safeStats.runs.success, total: safeStats.runs.total, icon: CheckCircle2, color: 'var(--success)' },
+        { label: 'Failed Runs', value: safeStats.runs.failed, icon: XCircle, color: 'var(--destructive)' },
+        { label: 'Total Stocks', value: safeStats.data.stocks, icon: Database, color: 'var(--accent)' },
     ]
 
     return (
         <div style={styles.container}>
+            {error && (
+                <div style={styles.errorBanner}>
+                    API unavailable: {error}
+                </div>
+            )}
+
             {/* Stat Cards */}
             <div style={styles.grid}>
                 {cards.map((card, i) => (
@@ -44,7 +65,7 @@ const Dashboard = ({ stats }) => {
                         Next Scheduled Runs
                     </h3>
                     <div style={styles.list}>
-                        {stats.next_runs.map((run, i) => (
+                        {safeStats.next_runs.map((run, i) => (
                             <div key={i} style={styles.listItem}>
                                 <div style={styles.jobName}>{run.job_name}</div>
                                 <div style={styles.jobTime}>
@@ -63,14 +84,14 @@ const Dashboard = ({ stats }) => {
                         Recent Failures
                     </h3>
                     <div style={styles.list}>
-                        {stats.recent_failures.map((f, i) => (
+                        {safeStats.recent_failures.map((f, i) => (
                             <div key={i} style={{ ...styles.listItem, borderLeft: '4px solid var(--destructive)' }}>
                                 <div style={styles.jobName}>{f.job_name}</div>
                                 <div style={styles.errorText}>{f.stderr}</div>
                                 <div style={styles.jobTime}>{new Date(f.started_at).toLocaleString()}</div>
                             </div>
                         ))}
-                        {stats.recent_failures.length === 0 && (
+                        {safeStats.recent_failures.length === 0 && (
                             <div style={styles.empty}>No recent failures. System is healthy! ✨</div>
                         )}
                     </div>
@@ -184,7 +205,15 @@ const styles = {
         textAlign: 'center',
         color: 'var(--muted-foreground)',
         padding: '2rem',
-    }
+    },
+    errorBanner: {
+        backgroundColor: 'rgba(220, 38, 38, 0.12)',
+        border: '1px solid rgba(220, 38, 38, 0.35)',
+        color: 'var(--destructive)',
+        borderRadius: 'var(--radius)',
+        padding: '0.75rem 1rem',
+        fontSize: '0.9rem',
+    },
 }
 
 export default Dashboard
