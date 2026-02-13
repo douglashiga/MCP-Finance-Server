@@ -146,7 +146,7 @@ class JobScheduler:
                 process.kill()
                 await process.communicate()
                 stdout_bytes = b""
-                stderr_bytes = b"Job timed out after {timeout} seconds"
+                stderr_bytes = f"Job timed out after {timeout} seconds".encode("utf-8")
                 exit_code = -1
                 status = "timeout"
 

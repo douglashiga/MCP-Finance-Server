@@ -76,7 +76,8 @@ async def get_stock_price(symbol: str, exchange: str = None, currency: str = 'US
 
 @mcp.tool()
 @require_connection
-async def get_historical_data(symbol: str, duration: str = "1 D", bar_size: str = "1 hour") -> Dict[str, Any]:
+async def get_historical_data(symbol: str, duration: str = "1 D", bar_size: str = "1 hour",
+                              exchange: str = None, currency: str = "USD") -> Dict[str, Any]:
     """
     Get historical OHLCV bars from Interactive Brokers.
 
@@ -87,12 +88,14 @@ async def get_historical_data(symbol: str, duration: str = "1 D", bar_size: str 
         symbol: IB ticker (no suffixes), e.g. 'AAPL', 'PETR4', 'VOLVB'
         duration: How far back. Options: '1 D', '1 W', '1 M', '3 M', '1 Y'
         bar_size: Bar granularity. Options: '1 min', '5 mins', '15 mins', '1 hour', '1 day'
+        exchange: Optional IB exchange code for non-US symbols (e.g. BOVESPA, SFB)
+        currency: Optional quote currency, e.g. USD, BRL, SEK
 
     Returns: {"success": true, "data": [{"date": "2024-01-15", "open": 150.0, "high": 155.0, "low": 149.0, "close": 153.0, "volume": 50000}]}
 
     Example: get_historical_data("AAPL", "1 M", "1 day")
     """
-    return await HistoryService.get_historical_data(symbol, duration, bar_size)
+    return await HistoryService.get_historical_data(symbol, duration, bar_size, exchange, currency)
 
 
 @mcp.tool()
@@ -452,7 +455,7 @@ async def trigger_job(job_name: str) -> Dict[str, Any]:
 
     Example: trigger_job("Extract Yahoo Prices") → runs the price extractor now
     """
-    return JobService.trigger_job(job_name)
+    return await JobService.trigger_job(job_name)
 
 
 @mcp.tool()
@@ -489,7 +492,7 @@ async def run_pipeline_health_check() -> Dict[str, Any]:
 
     Use this when you want to verify that the whole pipeline is functional.
     """
-    return JobService.run_pipeline_health_check()
+    return await JobService.run_pipeline_health_check()
 
 
 # ============================================================================
@@ -866,10 +869,17 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, _handle_signal)
 
     logger.info(f"[SERVER] Starting MCP Finance Server (transport={MCP_TRANSPORT}, host={MCP_HOST}, port={MCP_PORT})")
-
     try:
+        boot_loop = asyncio.get_event_loop()
+        boot_loop.run_until_complete(_startup())
         mcp.run(transport=MCP_TRANSPORT)
     except KeyboardInterrupt:
         pass
     except Exception as e:
         logger.critical(f"Server crashed: {e}")
+    finally:
+        try:
+            shutdown_loop = asyncio.get_event_loop()
+            shutdown_loop.run_until_complete(ib_conn.shutdown())
+        except Exception:
+            pass

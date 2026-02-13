@@ -3,18 +3,40 @@ Job Management Service — Allows LLM to query, trigger, and monitor
 data loader jobs via MCP tools.
 """
 import logging
-import subprocess
 import os
-from datetime import datetime
+from sqlalchemy import func
 from dataloader.database import SessionLocal
 from dataloader.models import Job, JobRun
+from dataloader.scheduler import scheduler, SCRIPTS_DIR
 
 logger = logging.getLogger(__name__)
 
-SCRIPTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "dataloader", "scripts")
-
 
 class JobService:
+    @staticmethod
+    def _find_job(session, job_name: str):
+        """
+        Resolve job by name.
+        Priority: exact case-insensitive match, then unique partial match.
+        """
+        exact = session.query(Job).filter(
+            func.lower(Job.name) == job_name.lower()
+        ).first()
+        if exact:
+            return exact, None
+
+        partial_matches = session.query(Job).filter(
+            Job.name.ilike(f"%{job_name}%")
+        ).order_by(Job.name.asc()).limit(5).all()
+
+        if not partial_matches:
+            return None, f"Job '{job_name}' not found"
+
+        if len(partial_matches) > 1:
+            names = ", ".join(m.name for m in partial_matches[:3])
+            return None, f"Ambiguous job name '{job_name}'. Matches: {names}"
+
+        return partial_matches[0], None
 
     @staticmethod
     def list_jobs():
@@ -56,12 +78,10 @@ class JobService:
         """Get recent run logs for a specific job."""
         session = SessionLocal()
         try:
-            job = session.query(Job).filter(
-                Job.name.ilike(f"%{job_name}%")
-            ).first()
+            job, error = JobService._find_job(session, job_name)
 
             if not job:
-                return {"success": False, "error": f"Job '{job_name}' not found"}
+                return {"success": False, "error": error}
 
             runs = session.query(JobRun).filter_by(
                 job_id=job.id
@@ -94,75 +114,37 @@ class JobService:
             session.close()
 
     @staticmethod
-    def trigger_job(job_name: str):
+    async def trigger_job(job_name: str):
         """Manually trigger a job execution."""
         session = SessionLocal()
         try:
-            job = session.query(Job).filter(
-                Job.name.ilike(f"%{job_name}%")
-            ).first()
+            job, error = JobService._find_job(session, job_name)
 
             if not job:
-                return {"success": False, "error": f"Job '{job_name}' not found"}
+                return {"success": False, "error": error}
 
             script_path = os.path.join(SCRIPTS_DIR, job.script_path)
             if not os.path.exists(script_path):
                 return {"success": False, "error": f"Script not found: {job.script_path}"}
 
-            # Create job run record
-            run = JobRun(
-                job_id=job.id,
-                started_at=datetime.utcnow(),
-                status="running",
-                trigger="manual",
-            )
-            session.add(run)
-            session.commit()
-            run_id = run.id
+            run_id = await scheduler.trigger_job(job.id)
+            if run_id is None:
+                return {"success": False, "error": f"Unable to trigger job '{job.name}'"}
 
-            # Execute script in background
-            try:
-                result = subprocess.run(
-                    ["python", script_path],
-                    capture_output=True,
-                    text=True,
-                    timeout=job.timeout_seconds or 300,
-                    cwd=os.path.dirname(SCRIPTS_DIR),
-                )
+            run = session.query(JobRun).filter(JobRun.id == run_id).first()
+            if not run:
+                return {"success": False, "error": f"Run {run_id} not found after execution"}
 
-                finished_at = datetime.utcnow()
-                duration = (finished_at - run.started_at).total_seconds()
-
-                run.finished_at = finished_at
-                run.duration_seconds = duration
-                run.exit_code = result.returncode
-                run.stdout = result.stdout
-                run.stderr = result.stderr
-                run.status = "success" if result.returncode == 0 else "failed"
-
-                # Parse records affected
-                for line in (result.stdout or "").split("\n"):
-                    if line.startswith("RECORDS_AFFECTED="):
-                        run.records_affected = int(line.split("=")[1])
-
-                session.commit()
-
-                return {
-                    "success": True,
-                    "job_name": job.name,
-                    "run_id": run_id,
-                    "status": run.status,
-                    "duration_seconds": duration,
-                    "records_affected": run.records_affected,
-                    "stdout": result.stdout[-500:] if result.stdout else None,
-                    "stderr": result.stderr[-500:] if result.stderr else None,
-                }
-
-            except subprocess.TimeoutExpired:
-                run.status = "timeout"
-                run.finished_at = datetime.utcnow()
-                session.commit()
-                return {"success": False, "error": f"Job timed out after {job.timeout_seconds}s"}
+            return {
+                "success": True,
+                "job_name": job.name,
+                "run_id": run_id,
+                "status": run.status,
+                "duration_seconds": run.duration_seconds,
+                "records_affected": run.records_affected,
+                "stdout": run.stdout[-500:] if run.stdout else None,
+                "stderr": run.stderr[-500:] if run.stderr else None,
+            }
 
         except Exception as e:
             logger.error(f"Trigger job error: {e}")
@@ -175,12 +157,10 @@ class JobService:
         """Enable or disable a job."""
         session = SessionLocal()
         try:
-            job = session.query(Job).filter(
-                Job.name.ilike(f"%{job_name}%")
-            ).first()
+            job, error = JobService._find_job(session, job_name)
 
             if not job:
-                return {"success": False, "error": f"Job '{job_name}' not found"}
+                return {"success": False, "error": error}
 
             job.is_active = active
             session.commit()
@@ -249,6 +229,6 @@ class JobService:
             session.close()
 
     @staticmethod
-    def run_pipeline_health_check():
+    async def run_pipeline_health_check():
         """Manually trigger the pipeline health check runner."""
-        return JobService.trigger_job("Pipeline Health Check")
+        return await JobService.trigger_job("Pipeline Health Check")

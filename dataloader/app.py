@@ -4,21 +4,19 @@ Run with: python -m dataloader.app
 """
 import logging
 import os
-import shutil
+import secrets
+from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from dataloader.database import SessionLocal, init_db, engine
-from dataloader.models import (
-    Base, Stock, Fundamental, Dividend, HistoricalPrice,
-    IndexComponent, IndexPerformance, Job, JobRun,
-)
+from dataloader.models import Job, JobRun
 from dataloader.scheduler import scheduler, SCRIPTS_DIR
 
 from sqlalchemy import inspect, text
@@ -28,9 +26,17 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="DataLoader", version="1.0.0")
 
+API_KEY = os.environ.get("DATALOADER_API_KEY")
+ALLOW_INSECURE = os.environ.get("DATALOADER_ALLOW_INSECURE", "false").lower() == "true"
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get("DATALOADER_ALLOWED_ORIGINS", "http://localhost:8001").split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -39,6 +45,48 @@ app.add_middleware(
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 os.makedirs(STATIC_DIR, exist_ok=True)
 os.makedirs(SCRIPTS_DIR, exist_ok=True)
+SCRIPTS_DIR_PATH = Path(SCRIPTS_DIR).resolve()
+
+
+def require_admin_api_key(x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")):
+    """Protect administrative endpoints with API key."""
+    if ALLOW_INSECURE:
+        return
+
+    if not API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="DATALOADER_API_KEY is not configured. Set it or enable DATALOADER_ALLOW_INSECURE=true only for development.",
+        )
+
+    if not x_api_key or not secrets.compare_digest(x_api_key, API_KEY):
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+def _validate_script_filename(filename: str) -> str:
+    """
+    Validate and normalize script filename.
+    Reject traversal and nested paths.
+    """
+    if not filename:
+        raise HTTPException(400, "Filename is required")
+
+    path_obj = Path(filename)
+    if path_obj.name != filename or path_obj.suffix != ".py":
+        raise HTTPException(400, "Invalid filename. Only top-level .py filenames are allowed")
+
+    if filename.startswith("."):
+        raise HTTPException(400, "Hidden script names are not allowed")
+
+    return filename
+
+
+def _resolve_script_path(filename: str) -> Path:
+    safe_name = _validate_script_filename(filename)
+    resolved = (SCRIPTS_DIR_PATH / safe_name).resolve()
+    if SCRIPTS_DIR_PATH not in resolved.parents and resolved != SCRIPTS_DIR_PATH:
+        raise HTTPException(400, "Invalid script path")
+    return resolved
 
 
 # ============================================================================
@@ -70,6 +118,10 @@ class JobUpdate(BaseModel):
 async def startup():
     init_db()
     scheduler.start()
+    if ALLOW_INSECURE:
+        logger.warning("[SECURITY] DATALOADER_ALLOW_INSECURE=true. API key checks are disabled.")
+    elif not API_KEY:
+        logger.error("[SECURITY] DATALOADER_API_KEY is not set. Administrative API endpoints will reject requests.")
     logger.info("[APP] DataLoader started on http://0.0.0.0:8001")
 
 @app.on_event("shutdown")
@@ -82,7 +134,7 @@ async def shutdown():
 # ============================================================================
 
 @app.get("/api/schema")
-def get_schema():
+def get_schema(_auth: None = Depends(require_admin_api_key)):
     """List all tables with columns, types, and foreign keys."""
     inspector = inspect(engine)
     tables = []
@@ -123,6 +175,7 @@ def browse_table(
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=500),
     search: str = None,
+    _auth: None = Depends(require_admin_api_key),
 ):
     """Browse data in a table with pagination and optional search."""
     inspector = inspect(engine)
@@ -176,7 +229,7 @@ def browse_table(
 # ============================================================================
 
 @app.get("/api/jobs")
-def list_jobs():
+def list_jobs(_auth: None = Depends(require_admin_api_key)):
     """List all data loader jobs."""
     session = SessionLocal()
     try:
@@ -216,14 +269,15 @@ def list_jobs():
 
 
 @app.post("/api/jobs")
-def create_job(job: JobCreate):
+def create_job(job: JobCreate, _auth: None = Depends(require_admin_api_key)):
     """Create a new data loader job."""
     session = SessionLocal()
     try:
+        safe_script_name = _validate_script_filename(job.script_path)
         db_job = Job(
             name=job.name,
             description=job.description,
-            script_path=job.script_path,
+            script_path=safe_script_name,
             cron_expression=job.cron_expression,
             is_active=job.is_active,
             timeout_seconds=job.timeout_seconds,
@@ -245,7 +299,7 @@ def create_job(job: JobCreate):
 
 
 @app.get("/api/jobs/{job_id}")
-def get_job(job_id: int):
+def get_job(job_id: int, _auth: None = Depends(require_admin_api_key)):
     """Get a specific job."""
     session = SessionLocal()
     try:
@@ -263,7 +317,7 @@ def get_job(job_id: int):
 
 
 @app.put("/api/jobs/{job_id}")
-def update_job(job_id: int, updates: JobUpdate):
+def update_job(job_id: int, updates: JobUpdate, _auth: None = Depends(require_admin_api_key)):
     """Update a job."""
     session = SessionLocal()
     try:
@@ -271,7 +325,11 @@ def update_job(job_id: int, updates: JobUpdate):
         if not j:
             raise HTTPException(404, "Job not found")
         
-        for field, value in updates.dict(exclude_unset=True).items():
+        update_payload = updates.dict(exclude_unset=True)
+        if "script_path" in update_payload:
+            update_payload["script_path"] = _validate_script_filename(update_payload["script_path"])
+
+        for field, value in update_payload.items():
             setattr(j, field, value)
         j.updated_at = datetime.utcnow()
         session.commit()
@@ -288,7 +346,7 @@ def update_job(job_id: int, updates: JobUpdate):
 
 
 @app.delete("/api/jobs/{job_id}")
-def delete_job(job_id: int):
+def delete_job(job_id: int, _auth: None = Depends(require_admin_api_key)):
     """Delete a job and all its runs."""
     session = SessionLocal()
     try:
@@ -304,7 +362,7 @@ def delete_job(job_id: int):
 
 
 @app.post("/api/jobs/{job_id}/run")
-async def trigger_job(job_id: int):
+async def trigger_job(job_id: int, _auth: None = Depends(require_admin_api_key)):
     """Manually trigger a job execution."""
     session = SessionLocal()
     try:
@@ -323,7 +381,7 @@ async def trigger_job(job_id: int):
 # ============================================================================
 
 @app.get("/api/jobs/{job_id}/runs")
-def get_job_runs(job_id: int, limit: int = Query(20, ge=1, le=100)):
+def get_job_runs(job_id: int, limit: int = Query(20, ge=1, le=100), _auth: None = Depends(require_admin_api_key)):
     """Get execution history for a job."""
     session = SessionLocal()
     try:
@@ -347,7 +405,7 @@ def get_job_runs(job_id: int, limit: int = Query(20, ge=1, le=100)):
 
 
 @app.get("/api/runs")
-def get_all_runs(limit: int = Query(50, ge=1, le=200)):
+def get_all_runs(limit: int = Query(50, ge=1, le=200), _auth: None = Depends(require_admin_api_key)):
     """Get all recent runs across all jobs."""
     session = SessionLocal()
     try:
@@ -373,7 +431,7 @@ def get_all_runs(limit: int = Query(50, ge=1, le=200)):
 
 
 @app.get("/api/runs/{run_id}/log")
-def get_run_log(run_id: int):
+def get_run_log(run_id: int, _auth: None = Depends(require_admin_api_key)):
     """Get full log output for a specific run."""
     session = SessionLocal()
     try:
@@ -400,21 +458,21 @@ def get_run_log(run_id: int):
 # ============================================================================
 
 @app.post("/api/scripts/upload")
-async def upload_script(file: UploadFile = File(...)):
+async def upload_script(file: UploadFile = File(...), _auth: None = Depends(require_admin_api_key)):
     """Upload a Python script file to the scripts directory."""
-    if not file.filename.endswith(".py"):
-        raise HTTPException(400, "Only .py files are allowed")
-    
-    dest = os.path.join(SCRIPTS_DIR, file.filename)
+    if not file.filename:
+        raise HTTPException(400, "Filename is required")
+
+    dest = _resolve_script_path(file.filename)
     with open(dest, "wb") as f:
         content = await file.read()
         f.write(content)
     
-    return {"filename": file.filename, "path": file.filename, "size": len(content)}
+    return {"filename": dest.name, "path": dest.name, "size": len(content)}
 
 
 @app.get("/api/scripts")
-def list_scripts():
+def list_scripts(_auth: None = Depends(require_admin_api_key)):
     """List all available scripts."""
     scripts = []
     if os.path.isdir(SCRIPTS_DIR):
@@ -430,14 +488,14 @@ def list_scripts():
 
 
 @app.get("/api/scripts/{filename}")
-def get_script_content(filename: str):
+def get_script_content(filename: str, _auth: None = Depends(require_admin_api_key)):
     """Get the content of a script file."""
-    full = os.path.join(SCRIPTS_DIR, filename)
-    if not os.path.isfile(full):
+    full = _resolve_script_path(filename)
+    if not full.is_file():
         raise HTTPException(404, "Script not found")
-    with open(full, "r") as f:
+    with open(full, "r", encoding="utf-8") as f:
         content = f.read()
-    return {"filename": filename, "content": content}
+    return {"filename": full.name, "content": content}
 
 
 # ============================================================================
@@ -445,7 +503,7 @@ def get_script_content(filename: str):
 # ============================================================================
 
 @app.get("/api/stats")
-def get_stats():
+def get_stats(_auth: None = Depends(require_admin_api_key)):
     """Get dashboard summary statistics."""
     session = SessionLocal()
     try:

@@ -193,7 +193,7 @@ async def test_get_job_logs():
 
 @pytest.mark.asyncio
 async def test_trigger_job():
-    with patch.object(JobService, 'trigger_job') as mock:
+    with patch.object(JobService, 'trigger_job', new_callable=AsyncMock) as mock:
         mock.return_value = {"success": True, "job_name": "Extract Yahoo Prices", "status": "success"}
         result = await trigger_job("Extract Yahoo Prices")
         assert result['success'] is True
@@ -234,7 +234,7 @@ async def test_get_option_chain_snapshot():
 @pytest.mark.asyncio
 async def test_run_pipeline_health_check():
     # Should trigger a background job
-    with patch.object(JobService, 'run_pipeline_health_check') as mock:
+    with patch.object(JobService, 'run_pipeline_health_check', new_callable=AsyncMock) as mock:
         mock.return_value = {"success": True, "status": "executed"}
         data = await run_pipeline_health_check()
         assert data["success"] is True

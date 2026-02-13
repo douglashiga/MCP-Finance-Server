@@ -96,6 +96,7 @@ class IBConnection:
             await self.connect()
             if not self.is_connected():
                 raise ConnectionError("Not connected to IB Gateway")
+        await self.start_heartbeat()
 
     async def check_health(self) -> dict:
         """Verify connection is truly active by requesting current time."""

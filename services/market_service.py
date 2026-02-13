@@ -202,16 +202,19 @@ class MarketService:
         try:
             # Query local database
             stock = session.query(Stock).filter_by(symbol=symbol).first()
+            if not stock and '.' not in symbol:
+                stock = session.query(Stock).filter(Stock.symbol.ilike(f"{symbol}.%")).first()
             
             if not stock:
                 logger.info(f"[PRICE] Stock {symbol} not found in local DB")
-                return {"success": False, "error": f"Stock {symbol} not found in database"}
+                yahoo_symbol = symbol if "." in symbol else MarketService._to_yahoo_symbol(symbol, symbol, currency)
+                return MarketService._yahoo_fallback(yahoo_symbol, "not_found_in_local_database")
             
             realtime = session.query(RealtimePrice).filter_by(stock_id=stock.id).first()
             
             if not realtime:
                 logger.info(f"[PRICE] No realtime price data for {symbol}")
-                return {"success": False, "error": f"No price data available for {symbol}"}
+                return MarketService._yahoo_fallback(stock.symbol, "missing_local_realtime_snapshot")
             
             return {
                 "success": True,
