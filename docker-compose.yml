@@ -91,6 +91,8 @@ services:
       - IB_HOST=ib-gateway
       - IB_PORT=4003
       - IB_CLIENT_ID=2 # Separate client ID to avoid conflict with mcp-server (ID 1)
+      - DATALOADER_ALLOW_INSECURE=${DATALOADER_ALLOW_INSECURE:-true}
+      - DATALOADER_API_KEY=${DATALOADER_API_KEY:-}
     ports:
       - "8001:8001"
     volumes:
