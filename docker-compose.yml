@@ -30,8 +30,8 @@ services:
     container_name: ib-gateway
     restart: unless-stopped
     environment:
-      TWS_USERID: ${TWS_USERID}
-      TWS_PASSWORD: ${TWS_PASSWORD}
+      TWS_USERID: ${TWS_USERID:-}
+      TWS_PASSWORD: ${TWS_PASSWORD:-}
       TRADING_MODE: ${TRADING_MODE:-paper}
       TWS_SETTINGS_PATH: /home/ibgateway/Jts
       READ_ONLY_API: "yes"
@@ -68,6 +68,7 @@ services:
       - MCP_TRANSPORT=sse
       - MCP_HOST=0.0.0.0
       - MCP_PORT=8000
+      - IB_ENABLED=${IB_ENABLED:-true}
       - LOG_LEVEL=INFO
     ports:
       - "8000:8000"

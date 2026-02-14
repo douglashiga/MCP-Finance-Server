@@ -24,20 +24,31 @@ EOF
 
 ```bash
 # Build das imagens
-docker-compose build
+docker compose build
 
 # Subir todos os serviços
-docker-compose up -d
+docker compose up -d
 
 # Ver logs
-docker-compose logs -f
+docker compose logs -f
 ```
+
+Importante:
+- `docker compose build` **apenas constrói** as imagens.
+- Para abrir a UI, você precisa rodar `docker compose up -d`.
+- Se aparecer `Cannot connect to the Docker daemon`, inicie o Docker Desktop primeiro.
 
 ### 3. Acessar os serviços
 
 - **Data Loader UI**: http://localhost:8001
 - **MCP Server**: http://localhost:8000
 - **IB Gateway VNC** (debug): vnc://localhost:5901 (senha: `password`)
+
+Para subir só a parte web (sem MCP/IB):
+
+```bash
+docker compose up -d postgres dataloader
+```
 
 ---
 
@@ -64,40 +75,34 @@ docker-compose logs -f
 
 ```bash
 # Parar tudo
-docker-compose down
+docker compose down
 
 # Parar e remover volumes (limpa banco)
-docker-compose down -v
+docker compose down -v
 
 # Rebuild após mudanças no código
-docker-compose build --no-cache
+docker compose build --no-cache
 
 # Ver logs de um serviço específico
-docker-compose logs -f dataloader
+docker compose logs -f dataloader
 
 # Executar comando dentro do container
-docker-compose exec dataloader python -m dataloader.seed
+docker compose exec dataloader python -m dataloader.seed
 
 # Restart de um serviço
-docker-compose restart mcp-finance
+docker compose restart mcp-finance
 ```
 
 ---
 
 ## 🔧 Configuração Avançada
 
-### Rodar sem IB Gateway (só Yahoo Finance)
+### Rodar sem IB Gateway (Yahoo-only)
 
-Edite `docker-compose.yml` e comente o serviço `ib-gateway`:
+Use `IB_ENABLED=false` para manter o MCP ativo sem tentar conectar no IB:
 
-```yaml
-services:
-  # ib-gateway:  # <-- Comentar tudo
-  #   image: ...
-  
-  mcp-finance:
-    # depends_on:  # <-- Remover dependência
-    #   - ib-gateway
+```bash
+IB_ENABLED=false docker compose up -d mcp-finance postgres dataloader
 ```
 
 ### Persistir banco de dados
@@ -118,7 +123,7 @@ dataloader:
 
 ```bash
 # Entrar no container
-docker-compose exec dataloader bash
+docker compose exec dataloader bash
 
 # Rodar seed
 python -m dataloader.seed
@@ -134,7 +139,7 @@ exit
 ### IB Gateway não conecta
 ```bash
 # Ver logs
-docker-compose logs ib-gateway
+docker compose logs ib-gateway
 
 # Acessar VNC para debug visual
 # Abrir VNC Viewer em: vnc://localhost:5901
@@ -144,7 +149,7 @@ docker-compose logs ib-gateway
 ### Data Loader não inicia
 ```bash
 # Ver logs
-docker-compose logs dataloader
+docker compose logs dataloader
 
 # Verificar se porta 8001 está livre
 lsof -i :8001
@@ -152,15 +157,15 @@ lsof -i :8001
 
 ### Rebuild completo
 ```bash
-docker-compose down -v
-docker-compose build --no-cache
-docker-compose up -d
+docker compose down -v
+docker compose build --no-cache
+docker compose up -d
 ```
 
 ---
 
 ## 📝 Notas
 
-- O banco SQLite fica em `finance_data.db` dentro do container
+- O banco principal em Docker é PostgreSQL (volume `postgres-data`)
 - Logs ficam em `./logs/` (mapeado do host)
-- Para produção, use um volume persistente para o banco
+- Para produção, use volumes persistentes e não rode com `DATALOADER_ALLOW_INSECURE=true`

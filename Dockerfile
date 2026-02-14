@@ -11,14 +11,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy dependency file first for caching
-COPY pyproject.toml .
+# Copy project files required to build/install package
+COPY pyproject.toml README.md ./
+COPY mcp_server.py exchange_map.json ./
+COPY core ./core
+COPY services ./services
+COPY dataloader ./dataloader
 
 # Install Python dependencies
 RUN pip install --no-cache-dir .
-
-# Copy application code
-COPY . .
 
 # Environment defaults
 ENV IB_HOST=host.docker.internal
@@ -29,8 +30,11 @@ ENV LOG_LEVEL=INFO
 
 # Health check
 HEALTHCHECK --interval=60s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import socket; s=socket.socket(); s.settimeout(2); s.connect(('${IB_HOST}', int('${IB_PORT}'))); s.close()" || exit 1
+    CMD python -c "import os,socket,sys; ib_enabled=os.getenv('IB_ENABLED','true').lower() in {'1','true','yes','on'}; \
+if not ib_enabled: sys.exit(0); \
+host=os.getenv('IB_HOST','127.0.0.1'); port=int(os.getenv('IB_PORT','4001')); \
+s=socket.socket(); s.settimeout(2); s.connect((host, port)); s.close()" || exit 1
 
 EXPOSE 8000
 
-CMD ["python", "mcp_server.py"]
+CMD ["mcp-finance"]
