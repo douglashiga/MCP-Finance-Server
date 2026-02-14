@@ -17,6 +17,8 @@ cat > .env << 'EOF'
 TWS_USERID=seu_usuario_ib
 TWS_PASSWORD=sua_senha_ib
 TRADING_MODE=paper
+IB_GATEWAY_PORT=4004
+IB_ENABLED=true
 EOF
 ```
 
@@ -58,6 +60,7 @@ docker compose up -d postgres dataloader
 - Interactive Brokers Gateway (headless)
 - Requer credenciais no `.env`
 - Healthcheck automático
+- Internamente usa `IB_GATEWAY_PORT` (paper=`4004`, live=`4003`)
 
 ### 2. **mcp-finance** (Porta 8000)
 - MCP Server principal

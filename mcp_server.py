@@ -2132,7 +2132,10 @@ async def _startup():
     if not IB_ENABLED:
         logger.warning("[SERVER] IB_ENABLED=false (Yahoo-only profile active).")
         return
-    await ib_conn.connect()
+    try:
+        await ib_conn.connect()
+    except Exception as e:
+        logger.error(f"[SERVER] IB not ready yet: {e}. Server will stay up and retry via heartbeat.")
     await ib_conn.start_heartbeat()
 
 

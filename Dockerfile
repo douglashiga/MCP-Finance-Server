@@ -31,7 +31,7 @@ ENV LOG_LEVEL=INFO
 # Health check
 HEALTHCHECK --interval=60s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import os,socket,sys; ib_enabled=os.getenv('IB_ENABLED','true').lower() in {'1','true','yes','on'}; \
-if not ib_enabled: sys.exit(0); \
+ib_enabled or sys.exit(0); \
 host=os.getenv('IB_HOST','127.0.0.1'); port=int(os.getenv('IB_PORT','4001')); \
 s=socket.socket(); s.settimeout(2); s.connect((host, port)); s.close()" || exit 1
 

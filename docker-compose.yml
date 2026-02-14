@@ -35,14 +35,15 @@ services:
       TRADING_MODE: ${TRADING_MODE:-paper}
       TWS_SETTINGS_PATH: /home/ibgateway/Jts
       READ_ONLY_API: "yes"
+      TWS_ACCEPT_INCOMING: accept
       VNC_SERVER_PASSWORD: password
     ports:
-      - "4001:4003" # API port (4003 inside -> 4001 host)
+      - "4001:${IB_GATEWAY_PORT:-4004}" # API port (paper=4004, live=4003) exposed as 4001 on host
       - "5901:5900" # VNC for debugging
     volumes:
       - ib-gateway-settings:/home/ibgateway/Jts
     healthcheck:
-      test: [ "CMD", "nc", "-z", "127.0.0.1", "4003" ]
+      test: [ "CMD", "nc", "-z", "127.0.0.1", "${IB_GATEWAY_PORT:-4004}" ]
       interval: 30s
       timeout: 5s
       retries: 5
@@ -63,7 +64,7 @@ services:
     environment:
       - DATABASE_URL=postgresql://finance:${POSTGRES_PASSWORD:-finance_secret}@postgres:5432/finance_db
       - IB_HOST=ib-gateway
-      - IB_PORT=4003
+      - IB_PORT=${IB_GATEWAY_PORT:-4004}
       - IB_CLIENT_ID=1
       - MCP_TRANSPORT=sse
       - MCP_HOST=0.0.0.0
@@ -90,8 +91,9 @@ services:
       - DATABASE_URL=postgresql://finance:${POSTGRES_PASSWORD:-finance_secret}@postgres:5432/finance_db
       - LOG_LEVEL=INFO
       - IB_HOST=ib-gateway
-      - IB_PORT=4003
+      - IB_PORT=${IB_GATEWAY_PORT:-4004}
       - IB_CLIENT_ID=2 # Separate client ID to avoid conflict with mcp-server (ID 1)
+      - IB_ENABLED=${IB_ENABLED:-true}
       - DATALOADER_ALLOW_INSECURE=${DATALOADER_ALLOW_INSECURE:-true}
       - DATALOADER_API_KEY=${DATALOADER_API_KEY:-}
     ports:
@@ -109,8 +111,15 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      ib-gateway:
+        condition: service_started
     environment:
       - DATABASE_URL=postgresql://finance:${POSTGRES_PASSWORD:-finance_secret}@postgres:5432/finance_db
+      - IB_HOST=ib-gateway
+      - IB_PORT=${IB_GATEWAY_PORT:-4004}
+      - IB_CLIENT_ID=3
+      - IB_ENABLED=${IB_ENABLED:-true}
+      - LOG_LEVEL=INFO
     profiles:
       - init # Only runs with: docker compose --profile init run seed
 
