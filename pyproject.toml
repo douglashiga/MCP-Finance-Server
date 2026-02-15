@@ -12,6 +12,7 @@ dependencies = [
     "uvicorn",
     "starlette",
     "sse-starlette",
+    "requests",
     "apscheduler",
     "fastapi",
     "sqlalchemy",

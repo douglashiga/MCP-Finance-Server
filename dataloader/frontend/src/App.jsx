@@ -11,7 +11,9 @@ import {
 import Dashboard from './pages/Dashboard'
 import Jobs from './pages/Jobs'
 import Schema from './pages/Schema'
+
 import DataBrowser from './pages/DataBrowser'
+import Queue from './pages/Queue'
 
 const EMPTY_STATS = {
     jobs: { active: 0, total: 0 },
@@ -83,6 +85,7 @@ const App = () => {
     const navItems = [
         { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
         { id: 'jobs', label: 'Jobs', icon: Activity },
+        { id: 'queue', label: 'Queue', icon: Activity },
         { id: 'schema', label: 'Schema', icon: Database },
         { id: 'data', label: 'Data Browser', icon: Terminal },
     ]
@@ -133,6 +136,7 @@ const App = () => {
                 <div style={styles.content}>
                     {activeTab === 'dashboard' && <Dashboard stats={stats || EMPTY_STATS} error={statsError} />}
                     {activeTab === 'jobs' && <Jobs />}
+                    {activeTab === 'queue' && <Queue />}
                     {activeTab === 'schema' && <Schema />}
                     {activeTab === 'data' && <DataBrowser />}
                 </div>

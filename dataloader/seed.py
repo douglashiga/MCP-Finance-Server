@@ -144,14 +144,40 @@ DEFAULT_JOBS = [
         "affected_tables": "company_profiles",
     },
     
-    # ===== LEGACY LOADERS (Keep for historical/dividend data) =====
+    # ===== MASTER DATA (ELT Stock Loading) =====
     {
-        "name": "Stock List Loader",
-        "description": "Loads the list of stocks (OMXS30, B3, Nasdaq Stockholm) and their index memberships",
-        "script_path": "load_stock_list.py",
-        "cron_expression": "0 5 * * 0",  # Weekly on Sunday at 5 AM
-        "timeout_seconds": 120,
+        "name": "Load B3 Stocks",
+        "description": "Extracts raw B3 stock list from GitHub API into raw_b3_stocks",
+        "script_path": "load_stocks_b3.py",
+        "cron_expression": "0 5 * * 0",  # Weekly
+        "timeout_seconds": 300,
+        "affected_tables": "raw_b3_stocks",
     },
+    {
+        "name": "Load US Stocks",
+        "description": "Extracts raw US stock list from Nasdaq FTP into raw_us_stocks",
+        "script_path": "load_stocks_us.py",
+        "cron_expression": "5 5 * * 0",  # Weekly
+        "timeout_seconds": 600,
+        "affected_tables": "raw_us_stocks",
+    },
+    {
+        "name": "Load OMX Stocks",
+        "description": "Extracts raw OMX stock list (static) into raw_omx_stocks",
+        "script_path": "load_stocks_omx.py",
+        "cron_expression": "10 5 * * 0",  # Weekly
+        "timeout_seconds": 120,
+        "affected_tables": "raw_omx_stocks",
+    },
+    {
+        "name": "Transform Stocks",
+        "description": "Normalizes raw stocks from all sources into main stocks table",
+        "script_path": "transform_stocks.py",
+        "cron_expression": "15 5 * * 0",  # Weekly after extraction
+        "timeout_seconds": 600,
+        "affected_tables": "stocks,index_components",
+    },
+
     {
         "name": "Reference Data Loader",
         "description": "Upserts normalized exchange and market index reference tables",
@@ -229,7 +255,11 @@ DEFAULT_JOBS = [
 FIRST_LOAD_STEPS = [
     # ===== MASTER DATA =====
     {"phase": "MASTER", "name": "Reference Data Loader", "command": "load_reference_data.py", "timeout": 180},
-    {"phase": "MASTER", "name": "Stock List Loader", "command": "load_stock_list.py", "timeout": 240},
+    {"phase": "MASTER", "name": "Load B3 Stocks", "command": "load_stocks_b3.py", "timeout": 300},
+    {"phase": "MASTER", "name": "Load US Stocks", "command": "load_stocks_us.py", "timeout": 600},
+    {"phase": "MASTER", "name": "Load OMX Stocks", "command": "load_stocks_omx.py", "timeout": 120},
+    {"phase": "MASTER", "name": "Transform Stocks", "command": "transform_stocks.py", "timeout": 600},
+    
     {"phase": "MASTER", "name": "Extract Yahoo Fundamentals", "command": "extract_yahoo_fundamentals.py", "timeout": 1800},
     {"phase": "MASTER", "name": "Transform Fundamentals", "command": "transform_fundamentals.py", "timeout": 900},
     {"phase": "MASTER", "name": "Normalize Classifications", "command": "normalize_classifications.py", "timeout": 900},

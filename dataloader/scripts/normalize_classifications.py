@@ -80,6 +80,7 @@ def _upsert_taxonomy(session, sector_name, industry_name, subindustry_name):
     if not sector:
         sector = SectorTaxonomy(code=sector_code, name=sector_name, is_active=True)
         session.add(sector)
+        session.flush()  # Ensure it is visible for subsequent queries within transaction
     else:
         sector.name = sector_name
         sector.is_active = True
@@ -89,6 +90,7 @@ def _upsert_taxonomy(session, sector_name, industry_name, subindustry_name):
     if not industry:
         industry = IndustryTaxonomy(code=industry_code, sector_code=sector_code, name=industry_name, is_active=True)
         session.add(industry)
+        session.flush()  # Ensure it is visible for subsequent queries within transaction
     else:
         industry.name = industry_name
         industry.sector_code = sector_code
@@ -104,6 +106,7 @@ def _upsert_taxonomy(session, sector_name, industry_name, subindustry_name):
             is_active=True,
         )
         session.add(subindustry)
+        session.flush()  # Ensure it is visible for subsequent queries within transaction
     else:
         subindustry.name = subindustry_name
         subindustry.industry_code = industry_code

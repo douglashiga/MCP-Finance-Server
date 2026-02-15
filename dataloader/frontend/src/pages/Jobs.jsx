@@ -14,6 +14,7 @@ import {
     AlertTriangle,
 } from 'lucide-react'
 import JobModal from '../components/JobModal'
+import LogViewer from '../components/LogViewer'
 
 const Jobs = () => {
     const [jobs, setJobs] = useState([])
@@ -26,6 +27,7 @@ const Jobs = () => {
     const [runningJobs, setRunningJobs] = useState({})
     const [notifications, setNotifications] = useState([])
     const [deleteTarget, setDeleteTarget] = useState(null)
+    const [viewLogRunId, setViewLogRunId] = useState(null)
 
     const notify = (type, message) => {
         const id = `${Date.now()}-${Math.random()}`
@@ -107,7 +109,7 @@ const Jobs = () => {
                 const err = await res.json().catch(() => ({}))
                 throw new Error(err.detail || err.error || 'Failed to delete job')
             }
-            notify('success', `Job "${deleteTarget.name}" removido`) 
+            notify('success', `Job "${deleteTarget.name}" removido`)
             setDeleteTarget(null)
             await fetchJobs()
             if (expandedJobId === deleteTarget.id) {
@@ -245,7 +247,7 @@ const Jobs = () => {
                                                         <span>{run.records_affected ?? '-'}</span>
                                                         <button
                                                             style={styles.viewLogBtn}
-                                                            onClick={() => notify('info', 'Visualizador de logs em breve')}
+                                                            onClick={() => setViewLogRunId(run.id)}
                                                         >
                                                             <ExternalLink size={14} /> View Log
                                                         </button>
@@ -288,6 +290,31 @@ const Jobs = () => {
                             <button style={styles.confirmCancelBtn} onClick={() => setDeleteTarget(null)}>Cancel</button>
                             <button style={styles.confirmDeleteBtn} onClick={confirmDeleteJob}>Delete</button>
                         </div>
+                    </div>
+                </div>
+            )}
+
+            {viewLogRunId && (
+                <div style={{
+                    position: 'fixed',
+                    inset: 0,
+                    backgroundColor: 'rgba(0,0,0,0.7)',
+                    display: 'flex',
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                    zIndex: 2000,
+                    backdropFilter: 'blur(3px)',
+                }}>
+                    <div style={{
+                        width: '90%',
+                        maxWidth: '900px',
+                        height: '80vh',
+                        backgroundColor: 'var(--background)',
+                        borderRadius: 'var(--radius)',
+                        overflow: 'hidden',
+                        boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)',
+                    }}>
+                        <LogViewer runId={viewLogRunId} onClose={() => setViewLogRunId(null)} />
                     </div>
                 </div>
             )}

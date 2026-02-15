@@ -28,6 +28,7 @@ class JobScheduler:
     def __init__(self):
         self.scheduler = AsyncIOScheduler()
         self._job_queue: asyncio.Queue[Optional[Dict[str, Any]]] = asyncio.Queue()
+        self.active_logs: Dict[int, Dict[str, str]] = {}
         self._worker_task: Optional[asyncio.Task] = None
 
     def start(self):
@@ -200,6 +201,10 @@ class JobScheduler:
             finally:
                 self._job_queue.task_done()
 
+    def get_live_log(self, run_id: int) -> dict:
+        """Get current live logs for a running job."""
+        return self.active_logs.get(run_id, {"stdout": "", "stderr": ""})
+
     async def _run_job_item(self, item: Dict[str, Any]):
         """Execute one queued item and persist final status."""
         run_id = item["run_id"]
@@ -219,6 +224,9 @@ class JobScheduler:
         finally:
             session.close()
 
+        # Initialize live log buffer
+        self.active_logs[run_id] = {"stdout": "", "stderr": ""}
+
         # Parse command and arguments
         import shlex
         parts = shlex.split(script_path)
@@ -236,9 +244,29 @@ class JobScheduler:
         start_time = time.time()
         status = "failed"
         exit_code = -1
-        stdout_text = ""
-        stderr_text = ""
+        stdout_lines = []
+        stderr_lines = []
         records_affected = None
+
+        async def read_stream(stream, is_stderr=False):
+            while True:
+                line = await stream.readline()
+                if not line:
+                    break
+                decoded = line.decode("utf-8", errors="replace")
+                if is_stderr:
+                    stderr_lines.append(decoded)
+                    self.active_logs[run_id]["stderr"] += decoded
+                else:
+                    stdout_lines.append(decoded)
+                    self.active_logs[run_id]["stdout"] += decoded
+                    # Check for magic variables
+                    if decoded.startswith("RECORDS_AFFECTED="):
+                        try:
+                            nonlocal records_affected
+                            records_affected = int(decoded.split("=")[1].strip())
+                        except (ValueError, IndexError):
+                            pass
 
         try:
             process = await asyncio.create_subprocess_exec(
@@ -250,34 +278,39 @@ class JobScheduler:
             )
 
             try:
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    process.communicate(), timeout=timeout
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        read_stream(process.stdout, is_stderr=False),
+                        read_stream(process.stderr, is_stderr=True),
+                        process.wait()
+                    ),
+                    timeout=timeout
                 )
                 exit_code = process.returncode
                 status = "success" if exit_code == 0 else "failed"
             except asyncio.TimeoutError:
                 process.kill()
-                await process.communicate()
-                stdout_bytes = b""
-                stderr_bytes = f"Job timed out after {timeout} seconds".encode("utf-8")
+                await process.wait()  # Ensure process is reaped
+                stderr_msg = f"\nJob timed out after {timeout} seconds\n"
+                stderr_lines.append(stderr_msg)
+                self.active_logs[run_id]["stderr"] += stderr_msg
                 exit_code = -1
                 status = "timeout"
 
-            stdout_text = stdout_bytes.decode("utf-8", errors="replace")[-50000:]  # Last 50KB
-            stderr_text = stderr_bytes.decode("utf-8", errors="replace")[-50000:]
-
-            for line in stdout_text.splitlines():
-                if line.startswith("RECORDS_AFFECTED="):
-                    try:
-                        records_affected = int(line.split("=")[1])
-                    except (ValueError, IndexError):
-                        pass
         except Exception as e:
-            stderr_text = str(e)
+            err_msg = str(e)
+            stderr_lines.append(err_msg)
+            self.active_logs[run_id]["stderr"] += err_msg
             status = "failed"
             logger.error(f"[SCHEDULER] Job {job_id} runtime error: {e}")
         finally:
             duration = time.time() - start_time
+            
+            # Clean up active logs
+            final_stdout = "".join(stdout_lines)[-100000:] # Limit to 100KB
+            final_stderr = "".join(stderr_lines)[-100000:]
+            self.active_logs.pop(run_id, None)
+
             session = SessionLocal()
             try:
                 run = session.query(JobRun).filter(JobRun.id == run_id).first()
@@ -285,8 +318,8 @@ class JobScheduler:
                     run.finished_at = datetime.utcnow()
                     run.status = status
                     run.exit_code = exit_code
-                    run.stdout = stdout_text
-                    run.stderr = stderr_text
+                    run.stdout = final_stdout
+                    run.stderr = final_stderr
                     run.duration_seconds = round(duration, 2)
                     run.records_affected = records_affected
                     session.commit()

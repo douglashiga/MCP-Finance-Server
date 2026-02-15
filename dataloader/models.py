@@ -446,6 +446,34 @@ class RawIBKROptionParam(Base):
     )
 
 
+class RawB3Stock(Base):
+    """Raw B3 stock data from GitHub API (cvscarlos)."""
+    __tablename__ = "raw_b3_stocks"
+
+    cod_neg = Column(String(20), primary_key=True)   # Primary key from source
+    data = Column(Text, nullable=False)              # Full JSON object
+    fetched_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class RawUSStock(Base):
+    """Raw US stock data from Nasdaq Trader FTP."""
+    __tablename__ = "raw_us_stocks"
+
+    symbol = Column(String(20), primary_key=True)
+    source = Column(String(20))                      # NASDAQ, OTHER (NYSE etc)
+    data = Column(Text, nullable=False)              # Full row data (JSON encoded)
+    fetched_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class RawOMXStock(Base):
+    """Raw Nasdaq Nordic (OMX) stock data."""
+    __tablename__ = "raw_omx_stocks"
+
+    symbol = Column(String(20), primary_key=True)
+    data = Column(Text, nullable=False)              # Full attributes
+    fetched_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class RawEarningsEvent(Base):
     """Raw earnings events from source providers before curation."""
     __tablename__ = "raw_earnings_events"

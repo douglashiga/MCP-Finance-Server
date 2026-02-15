@@ -34,7 +34,7 @@ services:
       TWS_PASSWORD: ${TWS_PASSWORD:?Set TWS_PASSWORD in .env}
       TRADING_MODE: ${TRADING_MODE:-paper}
       TWS_SETTINGS_PATH: /home/ibgateway/Jts
-      READ_ONLY_API: "yes"
+      READ_ONLY_API: "no"
       TWS_ACCEPT_INCOMING: accept
       VNC_SERVER_PASSWORD: password
     ports:

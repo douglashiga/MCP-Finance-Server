@@ -11,6 +11,7 @@ import io
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Any
+import asyncio
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -444,9 +445,11 @@ def browse_table(
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=500),
     search: str = None,
+    sort_by: str = None,
+    sort_order: str = Query("asc", regex="^(asc|desc)$"),
     _auth: None = Depends(require_admin_api_key),
 ):
-    """Browse data in a table with pagination and optional search."""
+    """Browse data in a table with pagination, search, and sorting."""
     inspector = inspect(engine)
     if table_name not in inspector.get_table_names():
         raise HTTPException(404, f"Table '{table_name}' not found")
@@ -466,8 +469,14 @@ def browse_table(
         count_q = f'SELECT COUNT(*) FROM "{table_name}"{where_clause}'
         total = conn.execute(text(count_q), params).scalar()
 
+        order_clause = ""
+        if sort_by and sort_by in cols:
+            # Safe because we verified sort_by is in columns list
+            order_clause = f' ORDER BY "{sort_by}" {sort_order.upper()}'
+
         query = (
-            f'SELECT * FROM "{table_name}"{where_clause} '
+            f'SELECT * FROM "{table_name}"{where_clause}'
+            f"{order_clause} "
             f"LIMIT :limit OFFSET :offset"
         )
         rows = conn.execute(
@@ -681,6 +690,28 @@ async def trigger_job(job_id: int, _auth: None = Depends(require_admin_api_key))
     return {"run_id": run_id, "status": "queued"}
 
 
+@app.get("/api/queue")
+def get_queue_status(_auth: None = Depends(require_admin_api_key)):
+    """Get jobs currently in queue or running."""
+    session = SessionLocal()
+    try:
+        queued_runs = session.query(JobRun, Job.name).join(Job).filter(
+            JobRun.status.in_(["queued", "running"]),
+            JobRun.finished_at.is_(None)
+        ).order_by(JobRun.started_at.asc()).all()
+
+        return {"queue": [{
+            "id": r.JobRun.id,
+            "job_id": r.JobRun.job_id,
+            "job_name": r.name,
+            "status": r.JobRun.status,
+            "started_at": r.JobRun.started_at.isoformat(),
+            "trigger": r.JobRun.trigger,
+        } for r in queued_runs]}
+    finally:
+        session.close()
+
+
 # ============================================================================
 # API — Job Runs / Logs
 # ============================================================================
@@ -756,6 +787,56 @@ def get_run_log(run_id: int, _auth: None = Depends(require_admin_api_key)):
         }
     finally:
         session.close()
+
+
+@app.get("/api/runs/{run_id}/stream")
+async def stream_run_log(run_id: int, _auth: None = Depends(require_admin_api_key)):
+    """Stream real-time logs for a running job using SSE."""
+    
+    async def event_generator():
+        last_stdout_len = 0
+        last_stderr_len = 0
+        
+        # Stream while job is running
+        while True:
+            # Get live logs from memory
+            live_logs = scheduler.get_live_log(run_id)
+            current_stdout = live_logs["stdout"]
+            current_stderr = live_logs["stderr"]
+            
+            # Send new chunks
+            if len(current_stdout) > last_stdout_len:
+                chunk = current_stdout[last_stdout_len:]
+                yield f"event: stdout\ndata: {chunk}\n\n"
+                last_stdout_len = len(current_stdout)
+            
+            if len(current_stderr) > last_stderr_len:
+                chunk = current_stderr[last_stderr_len:]
+                yield f"event: stderr\ndata: {chunk}\n\n"
+                last_stderr_len = len(current_stderr)
+            
+            # Check if job is finished
+            session = SessionLocal()
+            run = session.query(JobRun).filter(JobRun.id == run_id).first()
+            session.close()
+            
+            if run and run.status not in ["queued", "running"]:
+                 # Send any remaining data from DB to be sure we didn't miss anything in race condition
+                final_stdout = run.stdout or ""
+                final_stderr = run.stderr or ""
+                
+                if len(final_stdout) > last_stdout_len:
+                    yield f"event: stdout\ndata: {final_stdout[last_stdout_len:]}\n\n"
+                
+                if len(final_stderr) > last_stderr_len:
+                    yield f"event: stderr\ndata: {final_stderr[last_stderr_len:]}\n\n"
+                    
+                yield f"event: done\ndata: {run.status}\n\n"
+                break
+            
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 # ============================================================================
