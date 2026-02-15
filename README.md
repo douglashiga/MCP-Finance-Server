@@ -90,6 +90,10 @@ Key normalized/curated tables used by MCP tools:
 - `get_exchange_info(symbol)`
 - `yahoo_search(query)`
 
+Notes:
+- `get_stock_price`, `get_historical_data`, `search_symbol`, `get_option_chain`, and `get_option_greeks` are DB-first (pipeline-backed snapshots).
+- IB live connection remains required for account/portfolio endpoints and ingestion jobs.
+
 ### IB Account and Portfolio
 
 - `get_account_summary(masked=True)`

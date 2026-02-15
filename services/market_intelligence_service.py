@@ -90,6 +90,9 @@ class MarketIntelligenceService:
     @staticmethod
     def _period_to_days(period: str) -> Optional[int]:
         mapping = {
+            "1d": 1,
+            "5d": 5,
+            "1w": 7,
             "1mo": 31,
             "3mo": 93,
             "6mo": 186,

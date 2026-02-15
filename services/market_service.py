@@ -274,27 +274,46 @@ class MarketService:
 
     @staticmethod
     async def search_symbol(query: str) -> Dict[str, Any]:
-        """Search for contracts and return detailed info including correct exchange."""
-        logger.info(f"[SEARCH] Query: {query}")
+        """Search symbols in local stock registry (DB-first)."""
+        from dataloader.database import SessionLocal
+        from dataloader.models import Stock
+
+        q = (query or "").strip()
+        if not q:
+            return {"success": False, "error": "Query cannot be empty"}
+
+        logger.info(f"[SEARCH_LOCAL] Query: {q}")
+        session = SessionLocal()
         try:
-            contracts = await asyncio.wait_for(
-                ib_conn.ib.reqMatchingSymbolsAsync(query),
-                timeout=TIMEOUT_MARKET
+            term = q.upper()
+            rows = (
+                session.query(Stock)
+                .filter(
+                    (Stock.symbol.ilike(f"{term}%")) |
+                    (Stock.symbol.ilike(f"%{term}%")) |
+                    (Stock.name.ilike(f"%{q}%"))
+                )
+                .order_by(Stock.symbol.asc())
+                .limit(30)
+                .all()
             )
-        except asyncio.TimeoutError:
-            return {"success": False, "error": "Timeout searching symbol"}
 
-        if not contracts:
-            return {"success": True, "data": [], "message": f"No symbols found matching '{query}'"}
-
-        results = []
-        for cd in contracts:
-            c = cd.contract
-            results.append({
-                "symbol": c.symbol,
-                "secType": c.secType,
-                "primaryExchange": c.primaryExchange,
-                "currency": c.currency,
-                "conId": c.conId,
-            })
-        return {"success": True, "data": results}
+            data = [
+                {
+                    "symbol": s.symbol,
+                    "name": s.name,
+                    "exchange": s.exchange,
+                    "currency": s.currency,
+                    "country": s.country,
+                    "source": "local_database",
+                }
+                for s in rows
+            ]
+            return {
+                "success": True,
+                "data": data,
+                "count": len(data),
+                "empty_reason": None if data else "no_local_symbol_match",
+            }
+        finally:
+            session.close()

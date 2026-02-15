@@ -26,13 +26,12 @@ from mcp_server import (
 )
 from services.market_service import MarketService
 from services.account_service import AccountService
-from services.history_service import HistoryService
-from services.option_service import OptionService
 from services.yahoo_service import YahooService
 from services.screener_service import ScreenerService
 from services.job_service import JobService
 from services.option_screener_service import OptionScreenerService
 from services.wheel_service import WheelService
+from services.market_intelligence_service import MarketIntelligenceService
 
 # Patch IB connection to always return True
 @pytest.fixture(autouse=True)
@@ -57,7 +56,7 @@ async def test_get_stock_price():
 
 @pytest.mark.asyncio
 async def test_get_historical_data():
-    with patch.object(HistoryService, 'get_historical_data', new_callable=AsyncMock) as mock:
+    with patch.object(MarketIntelligenceService, 'get_historical_data_cached') as mock:
         mock.return_value = {"success": True, "data": [{"date": "2024-01-01", "close": 150.0}]}
         result = await get_historical_data("AAPL")
         assert result['success'] is True
@@ -80,16 +79,37 @@ async def test_get_account_summary():
 
 @pytest.mark.asyncio
 async def test_get_option_chain():
-    with patch.object(OptionService, 'get_option_chain', new_callable=AsyncMock) as mock:
-        mock.return_value = {"success": True, "data": {"expirations": ["20240119"], "strikes": [150.0]}}
+    with patch.object(OptionScreenerService, 'get_option_chain_snapshot') as mock:
+        mock.return_value = {
+            "success": True,
+            "symbol": "AAPL",
+            "data": [{"expiry": "2024-01-19", "strike": 150.0, "right": "CALL"}],
+            "as_of_datetime": "2024-01-01T00:00:00",
+        }
         result = await get_option_chain("AAPL")
         assert result['success'] is True
         assert "expirations" in result['data']
 
 @pytest.mark.asyncio
 async def test_get_option_greeks():
-    with patch.object(OptionService, 'get_option_greeks', new_callable=AsyncMock) as mock:
-        mock.return_value = {"success": True, "data": {"delta": 0.5, "gamma": 0.02}}
+    with patch.object(OptionScreenerService, 'get_option_screener') as mock:
+        mock.return_value = {
+            "success": True,
+            "data": [{
+                "option_symbol": "AAPL240119C00150000",
+                "strike": 150.0,
+                "right": "CALL",
+                "bid": 3.0,
+                "ask": 3.2,
+                "last": 3.1,
+                "iv": 0.25,
+                "delta": 0.5,
+                "gamma": 0.02,
+                "theta": -0.04,
+                "vega": 0.12,
+                "updated_at": "2024-01-01T00:00:00",
+            }],
+        }
         result = await get_option_greeks("AAPL", "20240119", 150.0, "C")
         assert result['success'] is True
         assert result['data']['delta'] == 0.5

@@ -22,9 +22,7 @@ except Exception:
 from core.connection import ib_conn
 from core.decorators import require_connection
 from services.market_service import MarketService
-from services.history_service import HistoryService
 from services.account_service import AccountService
-from services.option_service import OptionService
 from services.yahoo_service import YahooService
 from services.screener_service import ScreenerService
 from services.job_service import JobService
@@ -676,76 +674,90 @@ async def get_server_metrics(output_format: str = "json") -> Dict[str, Any]:
     return {"data": {"format": "json", "payload": metrics_payload}}
 
 # ============================================================================
-# IBKR Tools (Real-time, Priority)
+# Market Tools (DB-first snapshots)
 # ============================================================================
 
 @mcp.tool()
-@tool_endpoint()
-@require_connection
+@tool_endpoint(source="local_db")
 async def get_stock_price(symbol: str, exchange: str = None, currency: str = 'USD') -> Dict[str, Any]:
     """
-    Get real-time market price for a stock from Interactive Brokers.
+    Get market price snapshot from local database (`realtime_prices`).
 
-    IMPORTANT: Use IB ticker format (no dots or suffixes).
-    For fundamentals (PE, EPS) use get_fundamentals instead.
+    Data is populated by pipeline jobs (IBKR/Yahoo extract + transforms), so this
+    endpoint does not require direct broker connectivity at request time.
+    For fundamentals (PE, EPS), use get_fundamentals instead.
 
     Parameters:
-        symbol: IB ticker (NO suffixes like .SA .ST .DE). Examples:
-            - US: 'AAPL', 'MSFT', 'TSLA', 'AMZN'
-            - Brazil: 'PETR4', 'VALE3', 'ITUB4'
-            - Sweden: 'VOLVB', 'ERICB'
-            - Germany: 'BMW', 'SAP'
-        exchange: IB exchange code. Examples: 'SMART' (US default), 'BOVESPA' (Brazil), 'SFB' (Stockholm), 'IBIS' (Germany/Xetra), 'LSE' (London)
-        currency: 'USD', 'BRL', 'SEK', 'EUR', 'GBP'
+        symbol: Stored symbol in local DB. Examples:
+            - US: 'AAPL'
+            - Brazil: 'PETR4.SA'
+            - Sweden: 'VOLV-B.ST'
+            - Germany: 'BMW.DE'
+        exchange: Optional compatibility argument (currently not required by DB lookup).
+        currency: Optional preferred currency hint for fallback flow.
 
-    Returns: {"success": true, "data": {"symbol": "AAPL", "exchange": "SMART", "currency": "USD", "price": 150.25, "close": 149.0}}
+    Returns: {"success": true, "data": {"symbol": "AAPL", "exchange": "NMS", "currency": "USD", "price": 150.25, ...}}
 
-    Example: get_stock_price("AAPL") or get_stock_price("PETR4", "BOVESPA", "BRL")
+    Example: get_stock_price("AAPL") or get_stock_price("PETR4.SA")
     """
     return await MarketService.get_price(symbol, exchange, currency)
 
 
 @mcp.tool()
-@tool_endpoint()
-@require_connection
+@tool_endpoint(source="local_db")
 async def get_historical_data(symbol: str, duration: str = "1 D", bar_size: str = "1 hour",
                               exchange: str = None, currency: str = "USD") -> Dict[str, Any]:
     """
-    Get historical OHLCV bars from Interactive Brokers.
+    Get historical OHLCV bars from local cache (`historical_prices`).
 
-    Use this for chart data, technical analysis, or trend detection.
-    Results are cached for 30 seconds to reduce API load.
+    This endpoint is DB-first and reads pipeline-curated data.
+    For live IB bars, use IB jobs to refresh local tables.
 
     Parameters:
-        symbol: IB ticker (no suffixes), e.g. 'AAPL', 'PETR4', 'VOLVB'
+        symbol: Local stock symbol, e.g. 'AAPL', 'PETR4.SA', 'VOLV-B.ST'
         duration: How far back. Options: '1 D', '1 W', '1 M', '3 M', '1 Y'
-        bar_size: Bar granularity. Options: '1 min', '5 mins', '15 mins', '1 hour', '1 day'
-        exchange: Optional IB exchange code for non-US symbols (e.g. BOVESPA, SFB)
-        currency: Optional quote currency, e.g. USD, BRL, SEK
+        bar_size: Kept for compatibility. Local cache currently serves daily bars.
+        exchange: Compatibility argument (ignored for local lookup).
+        currency: Compatibility argument (ignored for local lookup).
 
     Returns: {"success": true, "data": [{"date": "2024-01-15", "open": 150.0, "high": 155.0, "low": 149.0, "close": 153.0, "volume": 50000}]}
 
     Example: get_historical_data("AAPL", "1 M", "1 day")
     """
     _validate_historical_params(duration, bar_size)
-    return await HistoryService.get_historical_data(symbol, duration, bar_size, exchange, currency)
+    duration_map = {
+        "1 D": "1d",
+        "1 W": "1w",
+        "1 M": "1mo",
+        "3 M": "3mo",
+        "1 Y": "1y",
+    }
+    period = duration_map.get(duration, "1y")
+    cached = MarketIntelligenceService.get_historical_data_cached(symbol, period=period, interval="1d")
+    if not isinstance(cached, dict):
+        return {"success": False, "error": "Unexpected historical cache response"}
+
+    # Preserve compatibility fields expected by existing callers.
+    if cached.get("success"):
+        cached.setdefault("meta", {})
+        cached["meta"]["mode"] = "db_first"
+        cached["meta"]["bar_size_requested"] = bar_size
+        cached["meta"]["bar_size_served"] = "1d"
+    return cached
 
 
 @mcp.tool()
-@tool_endpoint()
-@require_connection
+@tool_endpoint(source="local_db")
 async def search_symbol(query: str) -> Dict[str, Any]:
     """
-    Search for a stock contract on Interactive Brokers by name or symbol.
+    Search symbols in local stock registry (`stocks`) by ticker or company name.
 
-    Use this when you know the ticker but want to confirm it exists on IB,
-    or to find the conId for further queries. For broader search by name/keyword,
-    use yahoo_search instead.
+    This endpoint is DB-first and does not require direct broker connectivity.
 
     Parameters:
         query: Ticker symbol or company name, e.g. 'AAPL', 'PETR4', 'Volvo', 'Apple'
 
-    Returns: {"success": true, "data": [{"symbol": "AAPL", "secType": "STK", "exchange": "NASDAQ", "conId": 265598}]}
+    Returns: {"success": true, "data": [{"symbol": "AAPL", "name": "Apple Inc.", "exchange": "NASDAQ", "currency": "USD"}]}
 
     Example: search_symbol("AAPL")
     """
@@ -797,35 +809,51 @@ async def get_account_summary(masked: bool = True) -> Dict[str, Any]:
 
 
 @mcp.tool()
-@tool_endpoint()
-@require_connection
+@tool_endpoint(source="options_cache")
 async def get_option_chain(symbol: str) -> Dict[str, Any]:
     """
-    Get available option strikes and expirations for a stock from Interactive Brokers.
+    Get available option strikes and expirations from local options cache (`option_metrics`).
 
     Use this FIRST to discover available options before calling get_option_greeks.
 
     Parameters:
-        symbol: Underlying IB ticker (no suffixes), e.g. 'AAPL', 'PETR4'
+        symbol: Underlying symbol in local DB, e.g. 'AAPL', 'PETR4.SA'
 
-    Returns: {"success": true, "data": {"underlying": "AAPL", "multiplier": "100", "expirations": ["20240119", "20240216"], "strikes": [140.0, 145.0, 150.0]}}
+    Returns: {"success": true, "data": {"underlying": "AAPL", "expirations": ["2024-01-19"], "strikes": [140.0, 145.0, 150.0]}}
 
     Example: get_option_chain("AAPL")
     """
-    return await OptionService.get_option_chain(symbol)
+    snapshot = OptionScreenerService.get_option_chain_snapshot(symbol)
+    if not snapshot.get("success"):
+        return snapshot
+
+    rows = snapshot.get("data", []) or []
+    expirations = sorted({row.get("expiry") for row in rows if row.get("expiry")})
+    strikes = sorted({float(row.get("strike")) for row in rows if row.get("strike") is not None})
+
+    return {
+        "success": True,
+        "data": {
+            "underlying": snapshot.get("symbol") or symbol,
+            "expirations": expirations,
+            "strikes": strikes,
+            "contracts": rows,
+            "as_of_datetime": snapshot.get("as_of_datetime"),
+            "source": "local_database",
+        },
+    }
 
 
 @mcp.tool()
-@tool_endpoint()
-@require_connection
+@tool_endpoint(source="options_cache")
 async def get_option_greeks(symbol: str, last_trade_date: str, strike: float, right: str) -> Dict[str, Any]:
     """
-    Get Greeks (delta, gamma, theta, vega) and market data for a specific option from Interactive Brokers.
+    Get Greeks (delta, gamma, theta, vega) and quote snapshot from local options cache.
 
     Call get_option_chain first to find valid expirations and strikes.
 
     Parameters:
-        symbol: Underlying IB ticker (no suffixes), e.g. 'AAPL'
+        symbol: Underlying symbol in local DB, e.g. 'AAPL', 'PETR4.SA'
         last_trade_date: Expiration in format 'YYYYMMDD', e.g. '20240119'
         strike: Strike price, e.g. 150.0
         right: 'C' for Call, 'P' for Put
@@ -835,7 +863,57 @@ async def get_option_greeks(symbol: str, last_trade_date: str, strike: float, ri
     Example: get_option_greeks("AAPL", "20240119", 150.0, "C")
     """
     _validate_option_greeks_params(last_trade_date, right)
-    return await OptionService.get_option_greeks(symbol, last_trade_date, strike, right.upper())
+    expiry = datetime.strptime(last_trade_date, "%Y%m%d").date().isoformat()
+    norm_right = "CALL" if right.upper() == "C" else "PUT"
+    snapshot = OptionScreenerService.get_option_screener(
+        symbol=symbol,
+        expiry=expiry,
+        right=norm_right,
+        has_liquidity=False,
+        limit=500,
+    )
+    if not snapshot.get("success"):
+        return snapshot
+
+    rows = snapshot.get("data", []) or []
+    if not rows:
+        return {
+            "success": False,
+            "error": f"No cached option greeks for {symbol} {expiry} {norm_right}",
+        }
+
+    target = None
+    for row in rows:
+        if row.get("strike") == strike:
+            target = row
+            break
+    if target is None:
+        target = min(rows, key=lambda r: abs(float(r.get("strike", 0.0)) - float(strike)))
+
+    return {
+        "success": True,
+        "data": {
+            "symbol": target.get("option_symbol"),
+            "bid": target.get("bid"),
+            "ask": target.get("ask"),
+            "last": target.get("last"),
+            "impliedVol": target.get("iv"),
+            "delta": target.get("delta"),
+            "gamma": target.get("gamma"),
+            "theta": target.get("theta"),
+            "vega": target.get("vega"),
+            "undPrice": None,
+            "as_of_datetime": target.get("updated_at"),
+            "source": "local_database",
+        },
+        "meta": {
+            "mode": "db_first",
+            "requested_strike": strike,
+            "resolved_strike": target.get("strike"),
+            "requested_right": right.upper(),
+            "resolved_right": target.get("right"),
+        },
+    }
 
 
 # ============================================================================
@@ -1774,9 +1852,8 @@ async def resource_portfolio_positions() -> Dict[str, Any]:
 
 
 @mcp.resource("finance://market/ticker/{symbol}")
-@require_connection
 async def resource_market_ticker(symbol: str) -> Dict[str, Any]:
-    """Get a real-time market snapshot for a symbol."""
+    """Get a local cached market snapshot for a symbol."""
     return await MarketService.get_price(symbol)
 
 
@@ -1787,83 +1864,34 @@ async def resource_market_ticker(symbol: str) -> Dict[str, Any]:
 @mcp.prompt()
 def ibkr_guide() -> str:
     """Essential guide about Interactive Brokers API. READ THIS FIRST before using any IB tools."""
-    return """## Interactive Brokers (IBKR) — Guide for LLM
+    return """## Market Data Routing Guide (DB-first)
 
-### 1. Ticker Format (CRITICAL)
-IB uses its OWN ticker format. NEVER send Yahoo/Bloomberg suffixes (.SA, .ST, .DE, .L, etc.) to IB tools.
+### 1. Runtime model
+- Market/fundamental tools are DB-first (pipeline snapshots).
+- IB connection is mainly for ingestion jobs and account/portfolio endpoints.
 
-| What the user says | IB Ticker | Exchange | Currency |
-|---------------------|-----------|----------|----------|
-| Petrobras / PETR4 | PETR4 | BOVESPA | BRL |
-| Volvo B / VOLV-B | VOLVB | SFB | SEK |
-| BMW | BMW | IBIS | EUR |
-| Apple / AAPL | AAPL | SMART | USD |
-| Shell / SHEL | SHEL | LSE | GBP |
-| LVMH / MC | MC | SBF | EUR |
-| Toyota / 7203 | 7203 | TSE | JPY |
+### 2. Tool routing
+| Need | Tool | Backend |
+|------|------|---------|
+| Latest price snapshot | get_stock_price | local DB (`realtime_prices`) |
+| Historical bars | get_historical_data | local DB (`historical_prices`) |
+| Symbol search | search_symbol | local DB (`stocks`) |
+| Option chain | get_option_chain | local DB (`option_metrics`) |
+| Option greeks | get_option_greeks | local DB (`option_metrics`) |
+| Fundamentals / dividends / company info | Yahoo tools | local DB snapshots |
+| Account / positions | get_account_summary + resource portfolio | IB live |
 
-Rules:
-- Remove dots and everything after them (PETR4.SA → PETR4)
-- Remove dashes (VOLV-B → VOLVB)
-- Always pass exchange and currency for non-US stocks
+### 3. Symbol format
+- DB/Yahoo symbols: use suffix format when applicable (`PETR4.SA`, `VOLV-B.ST`, `BMW.DE`).
+- Search can use ticker or company name.
 
-### 2. Exchange Codes
-| Country | IB Exchange | Currency |
-|---------|------------|----------|
-| US | SMART | USD |
-| Brazil | BOVESPA | BRL |
-| Sweden | SFB | SEK |
-| Germany | IBIS | EUR |
-| UK | LSE | GBP |
-| France | SBF | EUR |
-| Japan | TSE | JPY |
-| Hong Kong | SEHK | HKD |
-| Australia | ASX | AUD |
-| Canada | TSE | CAD |
-| Italy | BVME | EUR |
-| Netherlands | AEB | EUR |
-| Norway | OSE | NOK |
-| Denmark | CSE | DKK |
-
-### 3. Market Hours (UTC)
-- US (NYSE/NASDAQ): 14:30–21:00
-- Brazil (BOVESPA): 14:00–21:00
-- Europe (LSE/IBIS/SFB): 08:00–16:30
-- Japan (TSE): 00:00–06:00
-- Hong Kong (SEHK): 01:30–08:00
-Outside these hours, bid/ask/price may be null. The 'close' field shows the last trading day's close.
-
-### 4. Data Limitations
-- Prices require market data subscription per exchange (paid separately in IB account)
-- If price/bid/ask/close are all null → User likely has no market data subscription for that exchange
-- Delayed data (15 min) may be available depending on subscription
-
-### 5. Read-Only Mode
-This server runs in READ-ONLY mode. You CANNOT place orders, modify positions, or execute trades.
-Available actions: view prices, historical data, account summary, portfolio positions, options data.
-
-### 6. Recommended Workflow
-1. If user asks about a stock, first determine the IB ticker + exchange
-2. Use search_symbol("company name") if unsure about the IB ticker
-3. For price: get_stock_price("TICKER", "EXCHANGE", "CURRENCY")
-4. For fundamentals/info: use Yahoo tools with Yahoo format (PETR4.SA, VOLV-B.ST)
-5. Combine data from both sources for complete analysis
-
-### 7. Yahoo vs IB — When to use which
-| Need | Tool | Format |
-|------|------|--------|
-| Live price, bid/ask | get_stock_price (IB) | PETR4 |
-| PE, EPS, margins | get_fundamentals (Yahoo) | PETR4.SA |
-| Company profile | get_company_info (Yahoo) | PETR4.SA |
-| Dividends | get_dividends (Yahoo) | PETR4.SA |
-| Historical bars | get_historical_data (IB) | PETR4 |
-| Options | get_option_chain (IB) | PETR4 |
-| Account/Portfolio | get_account_summary (IB) | — |
+### 4. Read-only mode
+This server runs in read-only mode. It does not place orders.
 """
 
 @mcp.prompt()
 def analyze_ticker(symbol: str) -> str:
-    """Comprehensive stock analysis prompt. Combines real-time IB data with Yahoo fundamentals."""
+    """Comprehensive stock analysis prompt using DB-first market + fundamentals data."""
     return f"""Please perform a comprehensive analysis of {symbol}:
 
 1. **Current Price** — use get_stock_price("{symbol}")
@@ -1900,28 +1928,23 @@ Analyze:
 
 @mcp.prompt()
 def ticker_format_guide() -> str:
-    """Guide on how to format stock tickers. IMPORTANT: IB tools and Yahoo tools use DIFFERENT formats."""
+    """Guide on how to format stock tickers for DB-first and fundamentals tools."""
     return """## Ticker Format Guide
 
-IMPORTANT: IB tools and Yahoo tools use DIFFERENT ticker formats!
+IMPORTANT: market tools in this server are DB-first and usually follow Yahoo-style symbols.
 
-### IB Tools (get_stock_price, search_symbol, get_historical_data, get_option_chain, get_option_greeks)
-Use clean IB tickers WITHOUT dots or suffixes:
-| Market | Ticker | Exchange | Currency |
-|--------|--------|----------|----------|
-| US | AAPL | SMART | USD |
-| Brazil | PETR4 | BOVESPA | BRL |
-| Sweden | VOLVB | SFB | SEK |
-| Germany | BMW | IBIS | EUR |
-| UK | SHEL | LSE | GBP |
-| France | MC | SBF | EUR |
+### DB-first market tools
+`get_stock_price`, `get_historical_data`, `search_symbol`, `get_option_chain`, `get_option_greeks`
 
 Examples:
 - get_stock_price("AAPL")
-- get_stock_price("PETR4", "BOVESPA", "BRL")
-- get_stock_price("VOLVB", "SFB", "SEK")
+- get_stock_price("PETR4.SA")
+- get_historical_data("VOLV-B.ST", "3 M", "1 day")
+- search_symbol("Volvo")
+- get_option_chain("AAPL")
 
-### Yahoo Tools (get_fundamentals, get_dividends, get_company_info, get_financial_statements)
+### Fundamentals tools
+`get_fundamentals`, `get_dividends`, `get_company_info`, `get_financial_statements`
 Use Yahoo Finance format WITH dot suffixes for international stocks:
 - get_fundamentals("AAPL")          # US (no suffix)
 - get_fundamentals("PETR4.SA")      # Brazil
@@ -1929,7 +1952,7 @@ Use Yahoo Finance format WITH dot suffixes for international stocks:
 - get_fundamentals("BMW.DE")        # Germany
 
 ### When unsure:
-Use search_symbol("company name") to find the correct IB ticker.
+Use search_symbol("company name") to find the closest local symbol.
 """
 
 
