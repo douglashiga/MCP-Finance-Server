@@ -51,7 +51,7 @@ DEFAULT_JOBS = [
         "script_path": "extract_ibkr_instruments.py",
         "cron_expression": "15 */6 * * *",  # Every 6 hours
         "timeout_seconds": 900,
-        "affected_tables": "raw_ibkr_contracts,raw_ibkr_option_params",
+        "affected_tables": "raw_ibkr_contracts,raw_ibkr_option_params,raw_ibkr_option_chains",
     },
     {
         "name": "Extract Option Metrics - B3",
@@ -59,7 +59,7 @@ DEFAULT_JOBS = [
         "script_path": "extract_option_metrics.py --market B3",
         "cron_expression": "*/15 * * * *",  # Every 15 minutes during market hours
         "timeout_seconds": 600,
-        "affected_tables": "option_metrics",
+        "affected_tables": "option_contracts,option_metrics",
     },
     {
         "name": "Extract Option Metrics - US",
@@ -67,7 +67,7 @@ DEFAULT_JOBS = [
         "script_path": "extract_option_metrics.py --market US",
         "cron_expression": "*/30 * * * *",  # Every 30 minutes
         "timeout_seconds": 1200,
-        "affected_tables": "option_metrics",
+        "affected_tables": "option_contracts,option_metrics",
     },
     {
         "name": "Extract Option Metrics - OMX",
@@ -75,7 +75,7 @@ DEFAULT_JOBS = [
         "script_path": "extract_option_metrics.py --market OMX",
         "cron_expression": "0 * * * *",  # Hourly
         "timeout_seconds": 600,
-        "affected_tables": "option_metrics",
+        "affected_tables": "option_contracts,option_metrics",
     },
     {
         "name": "Snapshot Option IV",
@@ -100,6 +100,14 @@ DEFAULT_JOBS = [
         "cron_expression": "40 7 * * 1-5",  # Weekdays at 7:40 AM
         "timeout_seconds": 1200,
         "affected_tables": "stock_intelligence_snapshots",
+    },
+    {
+        "name": "Extract Avanza Options",
+        "description": "Fetches option chains and metrics from Avanza (OMX market)",
+        "script_path": "extract_avanza_options.py --market OMX",
+        "cron_expression": "0 * * * *",  # Hourly
+        "timeout_seconds": 600,
+        "affected_tables": "option_contracts,option_metrics",
     },
     
     # ===== TRANSFORMERS (Normalize raw data into domain tables) =====
@@ -285,6 +293,7 @@ FIRST_LOAD_STEPS = [
     {"phase": "COMPUTE", "name": "Calculate Stock Metrics", "command": "calculate_stock_metrics.py", "timeout": 3600},
     {"phase": "COMPUTE", "name": "Update Market Movers", "command": "update_market_movers.py", "timeout": 1200},
     {"phase": "COMPUTE", "name": "Load Event Calendar", "command": "load_event_calendar.py --days-ahead 180 --lookback-days 14", "timeout": 1200},
+    {"phase": "COMPUTE", "name": "Extract Avanza Options", "command": "extract_avanza_options.py --market OMX", "timeout": 1200},
     {"phase": "COMPUTE", "name": "Load Market Intelligence", "command": "load_market_intelligence.py --news-limit 25", "timeout": 2400},
 ]
 

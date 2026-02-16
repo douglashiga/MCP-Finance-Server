@@ -10,10 +10,17 @@ import argparse
 import asyncio
 from datetime import datetime
 
+# Fix Event Loop for certain environments
+try:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+except Exception:
+    pass
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from dataloader.database import SessionLocal
-from dataloader.models import Stock, RawIBKRContract, RawIBKROptionParam
+from dataloader.models import Stock, RawIBKRContract, RawIBKROptionParam, RawIBKROptionChain
 from core.connection import ib_conn
 from services.market_service import MarketService
 
@@ -59,6 +66,7 @@ async def main_async(test=False, market=None):
     session = SessionLocal()
     contracts_count = 0
     options_count = 0
+    chains_count = 0
 
     try:
         await ib_conn.connect()
@@ -108,6 +116,7 @@ async def main_async(test=False, market=None):
                 )
                 for p in params or []:
                     payload = _safe_option_param_payload(p)
+                    # Legacy table
                     session.add(
                         RawIBKROptionParam(
                             symbol=stock.symbol,
@@ -120,14 +129,26 @@ async def main_async(test=False, market=None):
                         )
                     )
                     options_count += 1
+                    
+                    # New unified table
+                    session.add(
+                        RawIBKROptionChain(
+                            stock_id=stock.id,
+                            exchange=p.exchange,
+                            multiplier=p.multiplier,
+                            data=json.dumps(payload),
+                            fetched_at=datetime.utcnow(),
+                        )
+                    )
+                    chains_count += 1
 
                 session.commit()
             except Exception as e:
                 session.rollback()
                 print(f"  ⚠️ failed {stock.symbol}: {e}", file=sys.stderr)
 
-        total = contracts_count + options_count
-        print(f"[EXTRACT IBKR INSTRUMENTS] contracts={contracts_count} option_params={options_count}")
+        total = contracts_count + options_count + chains_count
+        print(f"[EXTRACT IBKR INSTRUMENTS] contracts={contracts_count} option_params={options_count} chains={chains_count}")
         print(f"RECORDS_AFFECTED={total}")
     finally:
         await ib_conn.shutdown()

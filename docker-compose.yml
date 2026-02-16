@@ -71,6 +71,8 @@ services:
       - MCP_PORT=8000
       - IB_ENABLED=${IB_ENABLED:-true}
       - LOG_LEVEL=INFO
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8000:8000"
     volumes:
@@ -96,6 +98,8 @@ services:
       - IB_ENABLED=${IB_ENABLED:-true}
       - DATALOADER_ALLOW_INSECURE=${DATALOADER_ALLOW_INSECURE:-true}
       - DATALOADER_API_KEY=${DATALOADER_API_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8001:8001"
     volumes:

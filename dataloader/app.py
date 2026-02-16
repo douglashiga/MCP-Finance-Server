@@ -20,8 +20,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from dataloader.database import SessionLocal, init_db, engine
-from dataloader.models import Job, JobRun
+from dataloader.models import Job, JobRun, LLMConfig
 from dataloader.scheduler import scheduler, SCRIPTS_DIR
+from services.option_screener_service import OptionScreenerService
 
 from sqlalchemy import inspect, text
 
@@ -164,6 +165,7 @@ def _sql_default_literal(value: Any) -> str:
 class JobCreate(BaseModel):
     name: str
     description: Optional[str] = None
+    category: Optional[str] = "general"
     script_path: str
     cron_expression: Optional[str] = None
     is_active: bool = True
@@ -172,10 +174,27 @@ class JobCreate(BaseModel):
 class JobUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
+    category: Optional[str] = None
     script_path: Optional[str] = None
     cron_expression: Optional[str] = None
     is_active: Optional[bool] = None
     timeout_seconds: Optional[int] = None
+
+class LLMConfigCreate(BaseModel):
+    provider: str
+    model_name: str
+    api_key: Optional[str] = None
+    api_base: Optional[str] = None
+    is_active: bool = True
+    is_default: bool = False
+
+class LLMConfigUpdate(BaseModel):
+    provider: Optional[str] = None
+    model_name: Optional[str] = None
+    api_key: Optional[str] = None
+    api_base: Optional[str] = None
+    is_active: Optional[bool] = None
+    is_default: Optional[bool] = None
 
 
 class SchemaColumnCreate(BaseModel):
@@ -565,6 +584,7 @@ def list_jobs(_auth: None = Depends(require_admin_api_key)):
                 "id": j.id,
                 "name": j.name,
                 "description": j.description,
+                "category": j.category,
                 "script_path": j.script_path,
                 "cron_expression": j.cron_expression,
                 "is_active": j.is_active,
@@ -591,6 +611,7 @@ def create_job(job: JobCreate, _auth: None = Depends(require_admin_api_key)):
         db_job = Job(
             name=job.name,
             description=job.description,
+            category=job.category,
             script_path=safe_script_name,
             cron_expression=job.cron_expression,
             is_active=job.is_active,
@@ -622,7 +643,7 @@ def get_job(job_id: int, _auth: None = Depends(require_admin_api_key)):
             raise HTTPException(404, "Job not found")
         return {
             "id": j.id, "name": j.name, "description": j.description,
-            "script_path": j.script_path, "cron_expression": j.cron_expression,
+            "category": j.category, "script_path": j.script_path, "cron_expression": j.cron_expression,
             "is_active": j.is_active, "timeout_seconds": j.timeout_seconds,
             "created_at": j.created_at.isoformat() if j.created_at else None,
         }
@@ -797,7 +818,7 @@ async def stream_run_log(run_id: int, _auth: None = Depends(require_admin_api_ke
         last_stdout_len = 0
         last_stderr_len = 0
         
-        # Stream while job is running
+
         while True:
             # Get live logs from memory
             live_logs = scheduler.get_live_log(run_id)
@@ -936,6 +957,125 @@ def get_stats(_auth: None = Depends(require_admin_api_key)):
 
 
 # ============================================================================
+# API — LLM Configuration
+# ============================================================================
+
+# ============================================================================
+# API — Options
+# ============================================================================
+
+@app.get("/api/options/chain")
+def get_option_chain(symbol: str = Query(...), expiry: str = Query(None)):
+    """Get option chain for a symbol and optional expiry."""
+    result = OptionScreenerService.get_option_chain_snapshot(symbol, expiry)
+    if not result.get("success"):
+        raise HTTPException(404, result.get("error", "Option chain not found"))
+    return result
+
+
+@app.get("/api/options/screener")
+def get_option_screener(
+    symbol: str = Query(None),
+    expiry: str = Query(None),
+    right: str = Query(None),
+    min_delta: float = Query(None),
+    max_delta: float = Query(None),
+    min_iv: float = Query(None),
+    max_iv: float = Query(None),
+    limit: int = Query(50),
+):
+    """Screen options based on various criteria."""
+    result = OptionScreenerService.get_option_screener(
+        symbol=symbol,
+        expiry=expiry,
+        right=right,
+        min_delta=min_delta,
+        max_delta=max_delta,
+        min_iv=min_iv,
+        max_iv=max_iv,
+        limit=limit
+    )
+    if not result.get("success"):
+        raise HTTPException(400, result.get("error", "Option screener error"))
+    return result
+
+
+@app.get("/api/llm-config")
+def list_llm_configs(_auth: None = Depends(require_admin_api_key)):
+    session = SessionLocal()
+    try:
+        configs = session.query(LLMConfig).order_by(LLMConfig.id).all()
+        return {"configs": [{
+            "id": c.id,
+            "provider": c.provider,
+            "model_name": c.model_name,
+            "api_base": c.api_base,
+            "is_active": c.is_active,
+            "is_default": c.is_default
+        } for c in configs]}
+    finally:
+        session.close()
+
+@app.post("/api/llm-config")
+def create_llm_config(config: LLMConfigCreate, _auth: None = Depends(require_admin_api_key)):
+    session = SessionLocal()
+    try:
+        # If set as default, unset others
+        if config.is_default:
+            session.query(LLMConfig).update({LLMConfig.is_default: False})
+        
+        new_config = LLMConfig(
+            provider=config.provider,
+            model_name=config.model_name,
+            api_key=config.api_key,
+            api_base=config.api_base,
+            is_active=config.is_active,
+            is_default=config.is_default
+        )
+        session.add(new_config)
+        session.commit()
+        return {"status": "created", "id": new_config.id}
+    finally:
+        session.close()
+
+@app.put("/api/llm-config/{config_id}")
+def update_llm_config(config_id: int, updates: LLMConfigUpdate, _auth: None = Depends(require_admin_api_key)):
+    session = SessionLocal()
+    try:
+        config = session.query(LLMConfig).filter(LLMConfig.id == config_id).first()
+        if not config:
+            raise HTTPException(404, "Config not found")
+            
+        data = updates.dict(exclude_unset=True)
+        
+        if data.get("is_default"):
+             session.query(LLMConfig).update({LLMConfig.is_default: False})
+
+        for k, v in data.items():
+            setattr(config, k, v)
+            
+        config.updated_at = datetime.utcnow()
+        session.commit()
+        return {"status": "updated", "id": config.id}
+    finally:
+        session.close()
+
+@app.delete("/api/llm-config/{config_id}")
+def delete_llm_config(config_id: int, _auth: None = Depends(require_admin_api_key)):
+    session = SessionLocal()
+    try:
+        config = session.query(LLMConfig).filter(LLMConfig.id == config_id).first()
+        if not config:
+            raise HTTPException(404, "Config not found")
+        
+        session.delete(config)
+        session.commit()
+        return {"status": "deleted"}
+    finally:
+        session.close()
+
+
+# ============================================================================
 # Static Files — Serve UI
 # ============================================================================
 
@@ -961,6 +1101,9 @@ async def serve_ui(full_path: str):
     if os.path.isfile(index_path):
         return FileResponse(index_path)
     return HTMLResponse("<h1>DataLoader</h1><p>UI not found. Place index.html in dataloader/static/</p>")
+
+
+
 
 
 # ============================================================================

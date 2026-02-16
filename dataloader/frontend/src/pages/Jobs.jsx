@@ -171,6 +171,9 @@ const Jobs = () => {
                                                 >
                                                     {job.is_active ? 'Active' : 'Inactive'}
                                                 </span>
+                                                <span style={styles.categoryBadge}>
+                                                    {job.category || 'general'}
+                                                </span>
                                             </div>
                                             <div style={styles.scriptLabel}>{job.script_path}</div>
                                         </div>
@@ -431,6 +434,15 @@ const styles = {
         padding: '0.2rem 0.5rem',
         borderRadius: '10px',
         fontWeight: '600',
+    },
+    categoryBadge: {
+        fontSize: '0.75rem',
+        padding: '0.2rem 0.5rem',
+        borderRadius: '4px',
+        backgroundColor: 'var(--secondary)',
+        color: 'var(--secondary-foreground)',
+        fontWeight: '500',
+        textTransform: 'uppercase',
     },
     scriptLabel: {
         fontSize: '0.85rem',

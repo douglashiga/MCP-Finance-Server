@@ -1,0 +1,207 @@
+
+
+
+
+    
+    
+        
+<!doctype html>
+
+<html lang="sv">
+    <head>
+        <meta charset="utf-8"/>
+        <base href="/"/>
+        <meta name="theme-color" media="(prefers-color-scheme: light)" content="#FDFDFD"/>
+        <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#031D20"/>
+        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5, viewport-fit=cover"/>
+        <meta name="apple-mobile-web-app-capable" content="yes"/>
+        <meta name="mobile-web-app-capable" content="yes"/>
+
+        <link rel="preconnect" href="https://cdn.avanza.se">
+        <link rel="preconnect" href="https://cdn.avanza.se" crossorigin="">
+        <link rel="preconnect" href="https://cms.avanza.se" crossorigin="">
+        <link rel="dns-prefetch" href="https://smetrics.avanza.se"/>
+
+        
+        <meta name="format-detection" content="telephone=no"/>
+
+        <title>Avanza</title>
+        <meta name="description" content="Avanza erbjuder ett enklare sparande i fonder och aktier. Kom igång med ett sparande på 3 minuter. Välkommen till Avanza – en bank som den borde vara.">
+        <meta property="og:image" content="https://cdn.avanza.se/frontend/resources/images/open-graph-default-logo.png"/>
+
+
+        <link href="https://cdn.avanza.se/frontend/resources/fonts/Roboto-Bold-latin-2.woff2" rel="preload" crossorigin="anonymous" as="font" type="font/woff2"/>
+        <link href="https://cdn.avanza.se/frontend/resources/fonts/Roboto-Medium-latin-2.woff2" rel="preload" crossorigin="anonymous" as="font" type="font/woff2"/>
+        <link href="https://cdn.avanza.se/frontend/resources/fonts/Roboto-Regular-latin-2.woff2" rel="preload" crossorigin="anonymous" as="font" type="font/woff2"/>
+        <link href="https://cdn.avanza.se/frontend/resources/fonts/Roboto-Avanza-Slab-Bold-latin-2.woff2" rel="preload" crossorigin="anonymous" as="font" type="font/woff2"/>
+        <link href="https://cdn.avanza.se/frontend/resources/images/favicon.ico" rel="shortcut icon" crossorigin="anonymous"/>
+        <link href="/frontend/pwa/resource.json/manifest.json" rel="manifest"/>
+
+        <link href="https://cdn.avanza.se/frontend/resources/app/main.e90fe5a70e7d445e104e37e66b574935.js" rel="modulepreload" crossorigin="anonymous" as="script" type="module" integrity="sha384-nCrS+hmPdER54BlkiELfgA1jnJd3aP+dwYV2rI/HIYA63Y62bwTg401tyMV0pAMi"/>
+<link href="https://cdn.avanza.se/frontend/resources/app/polyfills.3c3fa4ad8c5a419dfc434dce0b095a7b.js" rel="modulepreload" crossorigin="anonymous" as="script" type="module" integrity="sha384-JgsKCMjmZZUV4Mt0/oEoSBsnzsJd7GiX35boUfrLcPPen4Ik1R7fzZfXMPIP3Zrq"/>
+<link href="https://cdn.avanza.se/frontend/resources/app/styles.03ee17689d6b4626.css" rel="stylesheet" crossorigin="anonymous" integrity="sha384-e5yFmIh6EtxryHf0YEkAnZCQcK7wQqbsWIJb4T/G0sUTeBgPCPIQmYD1aJf+kEVH"/>
+
+    </head>
+    <body>
+        <script>
+            var AZA = AZA || {};
+            function AZAPostPlatformBootFailed(retries) {
+                if (document.cookie.indexOf('AZAWEBVIEW=true') === -1) {
+                    return;
+                }
+
+                var HOOK_NAME = 'avanzaNativeApp';
+                if (!window[HOOK_NAME] || typeof window[HOOK_NAME].onEvent !== 'function') {
+                    if (retries < 200) {
+                        setTimeout(function () {
+                            AZAPostPlatformBootFailed(retries + 1);
+                        }, 50);
+                    }
+                    return;
+                }
+
+                window[HOOK_NAME].onEvent('PLATFORM_BOOT_FAILED', JSON.stringify({}));
+            }
+
+            var AZAPlatformBootErrorHandler = function (e) {
+                if (e.target && e.target.src && e.target.src.match(/\.js/gi) !== null) {
+                    window.removeEventListener('error', AZAPlatformBootErrorHandler, true);
+                    AZAPostPlatformBootFailed(0);
+                }
+            };
+
+            window.AZAPlatformLoad = function () {
+                window.removeEventListener('error', AZAPlatformBootErrorHandler, true);
+            };
+
+            window.addEventListener('error', AZAPlatformBootErrorHandler, true);
+
+            // Handle theme setting so that bootloader etc. is correctly themed
+            try {
+                // This implementation needs to match theme handler service and local storage service
+                let theme = 'light';
+                const themeEnc = localStorage.getItem('browser-theme-setting');
+                if (themeEnc) {
+                    theme = JSON.parse(decodeURIComponent(atob(themeEnc))).value;
+                }
+
+                if (theme === 'system') {
+                    theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+                }
+
+                if (theme === 'dark') {
+                    document.body.dataset.theme = 'dark';
+                }
+            } catch (e) {}
+
+            if (document.cookie.indexOf('AZAWEBVIEW=true') > -1) {
+                const viewportTag = document.querySelector('meta[name=viewport]');
+                viewportTag.setAttribute('content', 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover');
+
+                const bodyTag = document.querySelector('body');
+                bodyTag.classList.add('is-transparent');
+            }
+        </script>
+
+        <aza-app></aza-app>
+
+        <div id="boot-loader-animation">
+            
+            <style>
+                aza-app {
+                    display: block;
+                    height: 50000px;
+                }
+                @keyframes boot-loader-fade-in {
+                    85% {
+                        opacity: 0;
+                        animation-timing-function: ease-in;
+                    }
+                    100% {
+                        opacity: 1;
+                    }
+                }
+                @keyframes boot-loader-rotate {
+                    100% {
+                        transform: rotate(360deg);
+                    }
+                }
+                @keyframes boot-loader-fade-out {
+                    30% {
+                        transform: scale(1.1);
+                        animation-timing-function: ease-in;
+                    }
+                    100% {
+                        transform: scale(0);
+                    }
+                }
+                #boot-loader-animation {
+                    background-color: var(--color-surface-main, #fdfdfd);
+                    bottom: 0;
+                    left: 0;
+                    opacity: 1;
+                    position: fixed;
+                    right: 0;
+                    top: 0;
+                    transition: opacity 0.4s ease-out 0.1s;
+                    z-index: 999999;
+                }
+                body[data-theme='dark'] #boot-loader-animation {
+                    background-color: var(--color-surface-main, #031d20);
+                }
+                .boot-loader {
+                    animation: boot-loader-fade-in 1.2s linear forwards;
+                    position: absolute;
+                    left: 50%;
+                    top: 50%;
+                    transform: translate(-50%, -50%);
+                    opacity: 0;
+                }
+                .boot-loader svg {
+                    display: block;
+                    position: relative;
+                    width: 48px;
+                    height: 48px;
+                    transform-origin: center center;
+                    animation: boot-loader-rotate 1s ease-in-out infinite;
+                }
+                .boot-loader svg .shape {
+                    stroke: var(--color-surface-discreet, #e5f8f2);
+                    stroke-width: 5;
+                }
+                .boot-loader svg .indicator {
+                    stroke: var(--color-icon-primary, #059b72);
+                    stroke-linecap: round;
+                    transform-origin: center center;
+                    stroke-dasharray: 30, 150;
+                    stroke-dashoffset: 100;
+                    stroke-width: 5;
+                }
+                body[data-theme='dark'] .boot-loader svg .shape {
+                    stroke: var(--color-surface-discreet, #054c54);
+                }
+                body[data-theme='dark'] .boot-loader svg .indicator {
+                    stroke: var(--color-icon-primary, #00c281);
+                }
+                .hide-boot-loader-animation {
+                    opacity: 0;
+                }
+                .hide-boot-loader-animation svg .indicator {
+                    opacity: 0;
+                }
+                .hide-boot-loader-animation svg {
+                    animation: boot-loader-fade-out 0.4s ease-out forwards;
+                }
+            </style>
+            <div class="boot-loader">
+                <svg class="spinner" viewBox="0 0 48 48" height="48" width="48">
+                    <circle class="shape" cx="24" cy="24" r="20" fill="none"></circle>
+                    <circle class="indicator" cx="24" cy="24" r="20" fill="none"></circle>
+                </svg>
+            </div>
+        </div>
+    <script type="module" src="https://cdn.avanza.se/frontend/resources/app/polyfills.3c3fa4ad8c5a419dfc434dce0b095a7b.js" integrity="sha384-JgsKCMjmZZUV4Mt0/oEoSBsnzsJd7GiX35boUfrLcPPen4Ik1R7fzZfXMPIP3Zrq" crossorigin="anonymous"></script><script type="module" src="https://cdn.avanza.se/frontend/resources/app/main.e90fe5a70e7d445e104e37e66b574935.js" integrity="sha384-nCrS+hmPdER54BlkiELfgA1jnJd3aP+dwYV2rI/HIYA63Y62bwTg401tyMV0pAMi" crossorigin="anonymous"></script></body>
+</html>
+
+    
+

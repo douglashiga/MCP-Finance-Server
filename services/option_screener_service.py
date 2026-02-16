@@ -149,14 +149,22 @@ class OptionScreenerService:
             data = []
             for metric in results:
                 data.append({
+                    "option_contract_id": metric.option_contract_id,
                     "option_symbol": metric.option_symbol,
                     "strike": metric.strike,
                     "right": metric.right,
                     "expiry": str(metric.expiry),
                     "bid": metric.bid,
                     "ask": metric.ask,
+                    "last": metric.last,
+                    "volume": metric.volume,
+                    "open_interest": metric.open_interest,
                     "delta": metric.delta,
-                    "iv": metric.iv
+                    "gamma": metric.gamma,
+                    "theta": metric.theta,
+                    "vega": metric.vega,
+                    "iv": metric.iv,
+                    "updated_at": metric.updated_at.isoformat() if metric.updated_at else None
                 })
             
             return {

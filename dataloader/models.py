@@ -12,6 +12,28 @@ Base = declarative_base()
 
 
 # ============================================================================
+# System Configuration Models
+# ============================================================================
+
+class LLMConfig(Base):
+    """Configuration for LLM providers (Ollama, OpenAI, Anthropic)."""
+    __tablename__ = "llm_configs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    provider = Column(String(50), nullable=False)            # e.g. ollama, openai, anthropic
+    model_name = Column(String(100), nullable=False)         # e.g. qwen2.5:32b, gpt-4
+    api_key = Column(String(200))                            # Optional for local models
+    api_base = Column(String(200))                           # e.g. http://host.docker.internal:11434
+    is_active = Column(Boolean, default=True)
+    is_default = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("provider", "model_name", name="uq_llm_provider_model"),
+    )
+
+# ============================================================================
 # Finance Data Models
 # ============================================================================
 
@@ -628,13 +650,68 @@ class MarketMover(Base):
     )
 
 
+class OptionContract(Base):
+    """
+    Registry for individual option contracts. 
+    Maintains persistent metadata like IB conId and localSymbol.
+    """
+    __tablename__ = "option_contracts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    stock_id = Column(Integer, ForeignKey("stocks.id", ondelete="CASCADE"), nullable=False)
+    provider = Column(String(20), default="IBKR")         # IBKR, AVANZA
+    con_id = Column(Integer, nullable=False)              # ID from provider
+    symbol = Column(String(50), nullable=False)           # Underling symbol
+    local_symbol = Column(String(50), nullable=False)     # e.g. PETR4C300
+    trading_class = Column(String(20))
+    multiplier = Column(String(10))
+    strike = Column(Float, nullable=False)
+    right = Column(String(5), nullable=False)             # CALL/PUT
+    expiry = Column(Date, nullable=False)
+    currency = Column(String(10))
+    exchange = Column(String(50))
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    stock = relationship("Stock")
+
+    __table_args__ = (
+        UniqueConstraint("provider", "con_id", name="uq_option_contract_provider_id"),
+        UniqueConstraint("local_symbol", "exchange", name="uq_option_contract_symbol_exchange"),
+        Index("ix_option_contracts_stock_expiry", "stock_id", "expiry"),
+    )
+
+
+class RawIBKROptionChain(Base):
+    """
+    Raw snapshot of an option chain for an underlying at a specific time.
+    Stores the full list of available contracts (sec-def params).
+    """
+    __tablename__ = "raw_ibkr_option_chains"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    stock_id = Column(Integer, ForeignKey("stocks.id", ondelete="CASCADE"), nullable=False)
+    exchange = Column(String(50))
+    multiplier = Column(String(20))
+    data = Column(Text, nullable=False)              # JSON payload of expirations/strikes
+    fetched_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    stock = relationship("Stock")
+
+    __table_args__ = (
+        Index("ix_raw_ibkr_opt_chain_stock_date", "stock_id", "fetched_at"),
+    )
+
+
 class OptionMetric(Base):
     """Real-time/Cached option chain data including Greeks and bid/ask."""
     __tablename__ = "option_metrics"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     stock_id = Column(Integer, ForeignKey("stocks.id", ondelete="CASCADE"), nullable=False)
-    option_symbol = Column(String(50), nullable=False) # e.g. PETR4C300
+    option_contract_id = Column(Integer, ForeignKey("option_contracts.id", ondelete="CASCADE"))
+    option_symbol = Column(String(50), nullable=False) # e.g. PETR4C300 (redundant but useful for quick lookups)
     strike = Column(Float, nullable=False)
     right = Column(String(5), nullable=False) # CALL/PUT
     expiry = Column(Date, nullable=False)
@@ -656,11 +733,13 @@ class OptionMetric(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     stock = relationship("Stock")
+    option_contract = relationship("OptionContract")
     
     __table_args__ = (
-        UniqueConstraint("option_symbol", name="uq_option_symbol"),
+        UniqueConstraint("option_contract_id", name="uq_option_contract_id"),
         Index("ix_option_metrics_stock_expiry", "stock_id", "expiry"),
         Index("ix_option_metrics_expiry", "expiry"),
+        Index("ix_option_metrics_contract", "option_contract_id"),
     )
 
 
@@ -780,6 +859,7 @@ class Job(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(200), nullable=False, unique=True)
     description = Column(Text)
+    category = Column(String(50), default="general")         # general, enrichment, ingestion, maintenance
     script_path = Column(String(500), nullable=False)       # Relative to dataloader/scripts/
     cron_expression = Column(String(100))                    # e.g. "0 6 * * *"
     is_active = Column(Boolean, default=True)
@@ -792,7 +872,7 @@ class Job(Base):
                         order_by="JobRun.started_at.desc()")
 
     def __repr__(self):
-        return f"<Job {self.name} (cron={self.cron_expression})>"
+        return f"<Job {self.name} ({self.category})>"
 
 
 class JobRun(Base):

@@ -13,11 +13,18 @@ from datetime import datetime, date, timedelta
 from typing import List
 import math
 
+# Fix Event Loop for certain environments
+try:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+except Exception:
+    pass
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from ib_insync import Option
 from dataloader.database import SessionLocal
-from dataloader.models import Stock, OptionMetric
+from dataloader.models import Stock, OptionMetric, OptionContract
 from core.connection import ib_conn
 from services.market_service import MarketService
 
@@ -73,7 +80,6 @@ def _select_strikes(strikes: List[float], ref_price: float = None, max_strikes: 
     ranked = sorted(unique, key=lambda s: abs(s - ref_price))
     return sorted(ranked[:max_strikes])
 
-
 async def get_chains_for_stock(ib, stock_record, max_weeks=5, max_expiries=3, max_strikes=15):
     """Fetch option chains and greeks for a single stock."""
     try:
@@ -107,8 +113,12 @@ async def get_chains_for_stock(ib, stock_record, max_weeks=5, max_expiries=3, ma
         target_expiries = []
         for chain in chains:
             # Prefer SMART/global chains when available for better liquidity coverage.
+            # However, for OMX/B3 we might need the specific exchange.
+            # If exchange is empty or SMART, it might be more broad.
             if chain.exchange not in {"SMART", underlying.exchange, underlying.primaryExchange}:
-                continue
+                # If it's a specific local exchange like SFB (OMX) or BOVESPA (B3), we should keep it.
+                pass
+            
             selected_exp = _select_expiries(list(chain.expirations), today, limit_date, max_expiries=max_expiries)
             for exp in selected_exp:
                 target_expiries.append((exp, chain))
@@ -121,9 +131,6 @@ async def get_chains_for_stock(ib, stock_record, max_weeks=5, max_expiries=3, ma
         option_contracts = []
         seen = set()
         for exp, chain in target_expiries:
-            # Limit strikes to around current price for efficiency if needed, 
-            # but for now we'll take what IB gives or filter a bit
-            # For simplicity, let's take all strikes in the chain for these expiries
             for strike in _select_strikes(list(chain.strikes), ref_price=ref_price, max_strikes=max_strikes):
                 for right in ['C', 'P']:
                     key = (underlying.symbol, exp, float(strike), right, chain.exchange)
@@ -144,7 +151,6 @@ async def get_chains_for_stock(ib, stock_record, max_weeks=5, max_expiries=3, ma
 
         # Qualify all options (batching helps)
         logger.info(f"Qualifying {len(option_contracts)} options for {stock_record.symbol}...")
-        # Qualify in chunks to avoid overloading
         chunk_size = 100
         qualified_options = []
         for i in range(0, len(option_contracts), chunk_size):
@@ -156,7 +162,6 @@ async def get_chains_for_stock(ib, stock_record, max_weeks=5, max_expiries=3, ma
             
         # Request market data (Greeks + Bid/Ask)
         logger.info(f"Requesting tickers for {len(qualified_options)} options...")
-        # reqTickers is efficient for batching
         tickers = []
         ticker_chunk_size = 100
         for i in range(0, len(qualified_options), ticker_chunk_size):
@@ -175,21 +180,24 @@ async def get_chains_for_stock(ib, stock_record, max_weeks=5, max_expiries=3, ma
                 continue
 
             results.append({
-                "option_symbol": t.contract.localSymbol,
-                "stock_id": stock_record.id,
-                "strike": _to_float(t.contract.strike),
-                "right": "CALL" if t.contract.right == 'C' else "PUT",
-                "expiry": expiry_date,
-                "bid": _to_float(t.bid),
-                "ask": _to_float(t.ask),
-                "last": _to_float(t.last),
-                "volume": _to_int(t.volume),
-                "open_interest": _to_int(t.openInterest),
-                "delta": _to_float(greeks.delta) if greeks else None,
-                "gamma": _to_float(greeks.gamma) if greeks else None,
-                "theta": _to_float(greeks.theta) if greeks else None,
-                "vega": _to_float(greeks.vega) if greeks else None,
-                "iv": _to_float(greeks.impliedVol) if greeks else None,
+                "contract": t.contract,
+                "metrics": {
+                    "option_symbol": t.contract.localSymbol,
+                    "stock_id": stock_record.id,
+                    "strike": _to_float(t.contract.strike),
+                    "right": "CALL" if t.contract.right == 'C' else "PUT",
+                    "expiry": expiry_date,
+                    "bid": _to_float(t.bid),
+                    "ask": _to_float(t.ask),
+                    "last": _to_float(t.last),
+                    "volume": _to_int(t.volume),
+                    "open_interest": _to_int(getattr(t, 'openInterest', None)),
+                    "delta": _to_float(greeks.delta) if greeks else None,
+                    "gamma": _to_float(greeks.gamma) if greeks else None,
+                    "theta": _to_float(greeks.theta) if greeks else None,
+                    "vega": _to_float(greeks.vega) if greeks else None,
+                    "iv": _to_float(greeks.impliedVol) if greeks else None,
+                }
             })
             
         return results
@@ -223,15 +231,49 @@ async def main_async(market=None, test=False):
         
         for stock in stocks:
             logger.info(f"Fetching options for {stock.symbol}...")
-            metrics_list = await get_chains_for_stock(ib, stock)
+            results = await get_chains_for_stock(ib, stock)
             
-            if not metrics_list:
+            if not results:
                 continue
+
+            # Unique-ify results by conId to avoid duplicate processing in the same batch
+            unique_results = []
+            seen_conids = set()
+            for r in results:
+                if r["contract"].conId not in seen_conids:
+                    unique_results.append(r)
+                    seen_conids.add(r["contract"].conId)
                 
-            for m in metrics_list:
-                # Upsert
+            for res in unique_results:
+                c = res["contract"]
+                m = res["metrics"]
+                
+                # 1. Upsert OptionContract
+                contract_record = session.query(OptionContract).filter_by(
+                    provider="IBKR", con_id=c.conId
+                ).first()
+                if not contract_record:
+                    contract_record = OptionContract(
+                        stock_id=stock.id,
+                        provider="IBKR",
+                        con_id=c.conId,
+                        symbol=c.symbol,
+                        local_symbol=c.localSymbol,
+                        trading_class=c.tradingClass,
+                        multiplier=c.multiplier,
+                        strike=float(c.strike),
+                        right="CALL" if c.right == 'C' else "PUT",
+                        expiry=m["expiry"],
+                        currency=c.currency,
+                        exchange=c.exchange
+                    )
+                    session.add(contract_record)
+                    session.flush() # get ID
+                
+                # 2. Upsert OptionMetric
+                m["option_contract_id"] = contract_record.id
                 existing = session.query(OptionMetric).filter_by(
-                    option_symbol=m["option_symbol"]
+                    option_contract_id=contract_record.id
                 ).first()
                 
                 if existing:
@@ -241,8 +283,8 @@ async def main_async(market=None, test=False):
                     session.add(OptionMetric(**m))
             
             session.commit()
-            count += len(metrics_list)
-            logger.info(f"Updated {len(metrics_list)} options for {stock.symbol}")
+            count += len(unique_results)
+            logger.info(f"Updated {len(unique_results)} options for {stock.symbol}")
             
         print(f"[EXTRACT OPTION METRICS] Market: {market} | Total options updated: {count}")
         print(f"RECORDS_AFFECTED={count}")

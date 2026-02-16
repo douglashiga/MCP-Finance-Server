@@ -7,6 +7,11 @@ import {
     Download,
     Filter,
     RefreshCw,
+    Maximize2,
+    X,
+    ArrowUp,
+    ArrowDown,
+    ArrowUpDown,
 } from 'lucide-react'
 
 const DataBrowser = () => {
@@ -20,6 +25,8 @@ const DataBrowser = () => {
     const [loading, setLoading] = useState(false)
     const [downloading, setDownloading] = useState(false)
     const [notifications, setNotifications] = useState([])
+    const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' })
+    const [expandedCell, setExpandedCell] = useState(null)
 
     const parseError = async (res) => {
         const payload = await res.json().catch(() => ({}))
@@ -55,7 +62,7 @@ const DataBrowser = () => {
         fetchTables()
     }, [])
 
-    const fetchData = async (tableName, page, search) => {
+    const fetchData = async (tableName, page, search, sort) => {
         if (!tableName) return
 
         setLoading(true)
@@ -65,6 +72,10 @@ const DataBrowser = () => {
             })
             if (search) {
                 params.set('search', search)
+            }
+            if (sort && sort.key) {
+                params.set('sort_by', sort.key)
+                params.set('sort_order', sort.direction)
             }
 
             const res = await fetch(`/api/tables/${tableName}?${params.toString()}`)
@@ -84,8 +95,8 @@ const DataBrowser = () => {
     }
 
     useEffect(() => {
-        fetchData(selectedTable, pagination.page, appliedSearch)
-    }, [selectedTable, pagination.page, appliedSearch])
+        fetchData(selectedTable, pagination.page, appliedSearch, sortConfig)
+    }, [selectedTable, pagination.page, appliedSearch, sortConfig])
 
     const handleSearch = (e) => {
         e.preventDefault()
@@ -94,7 +105,16 @@ const DataBrowser = () => {
     }
 
     const handleRefresh = async () => {
-        await fetchData(selectedTable, pagination.page, appliedSearch)
+        await fetchData(selectedTable, pagination.page, appliedSearch, sortConfig)
+    }
+
+    const handleSort = (key) => {
+        setSortConfig((current) => {
+            if (current.key === key) {
+                return { key, direction: current.direction === 'asc' ? 'desc' : 'asc' }
+            }
+            return { key, direction: 'asc' }
+        })
     }
 
     const handleDownload = async () => {
@@ -152,6 +172,7 @@ const DataBrowser = () => {
                             setPagination((p) => ({ ...p, page: 1 }))
                             setSearchInput('')
                             setAppliedSearch('')
+                            setSortConfig({ key: null, direction: 'asc' })
                         }}
                     >
                         {tables.map((t) => (
@@ -208,7 +229,18 @@ const DataBrowser = () => {
                         <thead>
                             <tr>
                                 {columns.map((col) => (
-                                    <th key={col} style={styles.th}>{col}</th>
+                                    <th
+                                        key={col}
+                                        style={{ ...styles.th, cursor: 'pointer', userSelect: 'none' }}
+                                        onClick={() => handleSort(col)}
+                                    >
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', justifyContent: 'space-between' }}>
+                                            {col}
+                                            {sortConfig.key === col ? (
+                                                sortConfig.direction === 'asc' ? <ArrowUp size={14} /> : <ArrowDown size={14} />
+                                            ) : <ArrowUpDown size={14} style={{ opacity: 0.3 }} />}
+                                        </div>
+                                    </th>
                                 ))}
                             </tr>
                         </thead>
@@ -217,7 +249,7 @@ const DataBrowser = () => {
                                 <tr key={i} style={styles.tr}>
                                     {columns.map((col) => (
                                         <td key={col} style={styles.td}>
-                                            {renderValue(row[col])}
+                                            <CellRenderer value={row[col]} onExpand={setExpandedCell} />
                                         </td>
                                     ))}
                                 </tr>
@@ -272,6 +304,64 @@ const DataBrowser = () => {
                     </div>
                 ))}
             </div>
+
+            {expandedCell && (
+                <div style={{
+                    position: 'fixed',
+                    inset: 0,
+                    backgroundColor: 'rgba(0,0,0,0.6)',
+                    display: 'flex',
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                    zIndex: 2500,
+                    backdropFilter: 'blur(2px)',
+                }}>
+                    <div style={{
+                        width: '80%',
+                        maxWidth: '800px',
+                        maxHeight: '80vh',
+                        backgroundColor: 'var(--background)',
+                        borderRadius: 'var(--radius)',
+                        border: '1px solid var(--border)',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        overflow: 'hidden',
+                        boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)',
+                    }}>
+                        <div style={{
+                            padding: '1rem',
+                            borderBottom: '1px solid var(--border)',
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            backgroundColor: 'var(--card)',
+                        }}>
+                            <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 600 }}>Cell Content</h3>
+                            <button
+                                onClick={() => setExpandedCell(null)}
+                                style={{
+                                    background: 'none',
+                                    border: 'none',
+                                    cursor: 'pointer',
+                                    color: 'var(--muted-foreground)',
+                                }}
+                            >
+                                <X size={20} />
+                            </button>
+                        </div>
+                        <div style={{
+                            padding: '1.5rem',
+                            overflow: 'auto',
+                            whiteSpace: 'pre-wrap',
+                            fontFamily: 'monospace',
+                            fontSize: '0.9rem',
+                            lineHeight: 1.5,
+                        }}>
+                            {typeof expandedCell === 'object' ? JSON.stringify(expandedCell, null, 2) : String(expandedCell)}
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     )
 }
@@ -282,11 +372,59 @@ const parseFilename = (contentDisposition) => {
     return match?.[1] || null
 }
 
-const renderValue = (val) => {
-    if (val === null || val === undefined) return <span style={{ color: 'var(--muted-foreground)', fontStyle: 'italic' }}>null</span>
-    if (typeof val === 'boolean') return val ? '✅' : '❌'
-    if (typeof val === 'object') return JSON.stringify(val)
-    return String(val)
+const CellRenderer = ({ value, onExpand }) => {
+    if (value === null || value === undefined) return <span style={{ color: 'var(--muted-foreground)', fontStyle: 'italic' }}>null</span>
+    if (typeof value === 'boolean') return value ? '✅' : '❌'
+
+    let displayValue = String(value)
+    let expandableValue = value
+
+    // If it's already an object, stringify it for display
+    if (typeof value === 'object') {
+        displayValue = JSON.stringify(value)
+    }
+    // If it's a string that looks like JSON, try to parse it for the expand view
+    else if (typeof value === 'string' && (value.trim().startsWith('{') || value.trim().startsWith('['))) {
+        try {
+            const parsed = JSON.parse(value)
+            expandableValue = parsed
+        } catch (e) {
+            // Not valid JSON, keep as string
+        }
+    }
+
+    const isLong = displayValue.length > 50 || typeof expandableValue === 'object'
+
+    return (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem' }}>
+            <span style={{
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                maxWidth: '250px',
+                display: 'block'
+            }}>
+                {displayValue}
+            </span>
+            {isLong && (
+                <button
+                    onClick={() => onExpand(expandableValue)}
+                    title="Expand content"
+                    style={{
+                        background: 'none',
+                        border: 'none',
+                        cursor: 'pointer',
+                        color: 'var(--primary)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        padding: 0,
+                    }}
+                >
+                    <Maximize2 size={14} />
+                </button>
+            )}
+        </div>
+    )
 }
 
 const styles = {
