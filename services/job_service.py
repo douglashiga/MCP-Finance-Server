@@ -247,3 +247,17 @@ class JobService:
     async def run_pipeline_health_check():
         """Manually trigger the pipeline health check runner."""
         return await JobService.trigger_job("Pipeline Health Check")
+    @staticmethod
+    def get_health_summary():
+        """Alias for get_job_status."""
+        return JobService.get_job_status()
+
+    @staticmethod
+    def enable_job(job_name: str):
+        """Enable a periodic job."""
+        return JobService.toggle_job(job_name, True)
+
+    @staticmethod
+    def disable_job(job_name: str):
+        """Disable a periodic job."""
+        return JobService.toggle_job(job_name, False)

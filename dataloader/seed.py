@@ -78,6 +78,14 @@ DEFAULT_JOBS = [
         "affected_tables": "option_contracts,option_metrics",
     },
     {
+        "name": "Extract Nasdaq Options - OMX",
+        "description": "Fallback scraper for OMX options from Nasdaq Nordic API (Real-time bid/ask)",
+        "script_path": "extract_nasdaq_options.py",
+        "cron_expression": "*/5 * * * *",  # Every 5 mins during market hours
+        "timeout_seconds": 300,
+        "affected_tables": "option_contracts,option_metrics",
+    },
+    {
         "name": "Snapshot Option IV",
         "description": "Builds daily IV snapshots (ATM/percentiles) from option_metrics",
         "script_path": "snapshot_option_iv.py",
@@ -294,6 +302,7 @@ FIRST_LOAD_STEPS = [
     {"phase": "COMPUTE", "name": "Update Market Movers", "command": "update_market_movers.py", "timeout": 1200},
     {"phase": "COMPUTE", "name": "Load Event Calendar", "command": "load_event_calendar.py --days-ahead 180 --lookback-days 14", "timeout": 1200},
     {"phase": "COMPUTE", "name": "Extract Avanza Options", "command": "extract_avanza_options.py --market OMX", "timeout": 1200},
+    {"phase": "COMPUTE", "name": "Extract Nasdaq Options - OMX", "command": "extract_nasdaq_options.py", "timeout": 1200},
     {"phase": "COMPUTE", "name": "Load Market Intelligence", "command": "load_market_intelligence.py --news-limit 25", "timeout": 2400},
 ]
 

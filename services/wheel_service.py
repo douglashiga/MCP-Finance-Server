@@ -1305,3 +1305,103 @@ class WheelService:
             },
             "empty_reason": None if stress_rows else "no_active_positions_to_stress",
         }
+    @staticmethod
+    def get_wheel_put_return(symbol: str, strike: float, expiry: str, premium: float, market: str = DEFAULT_MARKET):
+        """Calculate annualized return for a specific put."""
+        today = date.today()
+        expiry_date = datetime.strptime(expiry, '%Y-%m-%d').date()
+        dte = max(1, (expiry_date - today).days)
+        annualized = _annualized_return_pct(premium, strike, dte)
+        return {
+            "success": True,
+            "symbol": symbol,
+            "strike": strike,
+            "premium": premium,
+            "dte": dte,
+            "annualized_return_percent": annualized,
+            "period_return_percent": (premium / strike) * 100.0 if strike > 0 else 0
+        }
+
+    @staticmethod
+    def get_wheel_put_breakeven(symbol: str, strike: float, premium: float):
+        """Calculate break-even for a put."""
+        return {
+            "success": True,
+            "symbol": symbol,
+            "strike": strike,
+            "premium": premium,
+            "break_even": strike - premium,
+            "buffer_percent": (premium / strike) * 100.0 if strike > 0 else 0
+        }
+
+    @staticmethod
+    def get_wheel_put_assignment_probability(symbol: str, strike: float, expiry: str, market: str = DEFAULT_MARKET):
+        """Calculate approximate assignment probability using Delta."""
+        session = SessionLocal()
+        try:
+            stock = _resolve_stock(session, symbol, market=market)
+            if not stock: return {"success": False, "error": "Stock not found"}
+            
+            expiry_date = datetime.strptime(expiry, '%Y-%m-%d').date()
+            metric = session.query(OptionMetric).filter(
+                OptionMetric.stock_id == stock.id,
+                OptionMetric.strike == strike,
+                OptionMetric.expiry == expiry_date,
+                OptionMetric.right == "PUT"
+            ).first()
+            
+            if not metric or metric.delta is None:
+                return {"success": False, "error": "Option metrics (Delta) not found"}
+            
+            prob = abs(metric.delta)
+            return {
+                "success": True,
+                "symbol": stock.symbol,
+                "strike": strike,
+                "expiry": expiry,
+                "delta": metric.delta,
+                "assignment_probability_approx": prob,
+                "note": "Assignment probability is approximated using the absolute value of Delta."
+            }
+        finally:
+            session.close()
+
+    @staticmethod
+    def get_wheel_capital_required(symbol: str, strike: float, contracts: int = 1, margin_pct: float = 1.0):
+        """Calculate capital needed for a set of contracts."""
+        capital = strike * DEFAULT_CONTRACT_MULTIPLIER * contracts * margin_pct
+        return {
+            "success": True,
+            "symbol": symbol,
+            "strike": strike,
+            "contracts": contracts,
+            "margin_requirement_pct": margin_pct,
+            "capital_required_sek": capital
+        }
+    @staticmethod
+    async def get_wheel_call_candidates(symbol: str, cost_basis: float, delta_min: float = 0.25, delta_max: float = 0.35, market: str = DEFAULT_MARKET):
+        """Find candidate calls for the second half of the Wheel strategy."""
+        # This uses OptionScreenerService internally
+        from services.option_screener_service import OptionScreenerService
+        return OptionScreenerService.get_option_screener(
+            symbol=symbol, right="CALL", min_delta=delta_min, max_delta=delta_max
+        )
+
+    @staticmethod
+    def get_wheel_call_return(symbol: str, strike: float, expiry: str, premium: float, cost_basis: float):
+        """Calculate total return for a covered call (premium + upside)."""
+        today = date.today()
+        expiry_date = datetime.strptime(expiry, '%Y-%m-%d').date()
+        dte = max(1, (expiry_date - today).days)
+        
+        capital_gain = (strike - cost_basis) if strike > cost_basis else 0
+        total_profit = premium + capital_gain
+        annualized = (total_profit / cost_basis) * (365 / dte) * 100.0 if cost_basis > 0 else 0
+        
+        return {
+            "success": True,
+            "symbol": symbol,
+            "annualized_return_percent": annualized,
+            "premium_return_percent": (premium / cost_basis) * 100.0 if cost_basis > 0 else 0,
+            "upside_potential_percent": ((strike - cost_basis) / cost_basis) * 100.0 if cost_basis > 0 and strike > cost_basis else 0
+        }

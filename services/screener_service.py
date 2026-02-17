@@ -520,3 +520,22 @@ class ScreenerService:
             return {"success": False, "error": str(e)}
         finally:
             session.close()
+    @staticmethod
+    def get_oversold_stocks(market: str = DEFAULT_MARKET, limit: int = DEFAULT_LIMIT):
+        """Get stocks with RSI < 30."""
+        return ScreenerService.get_technical_signals(market=market, signal_type="oversold", limit=limit)
+
+    @staticmethod
+    def get_overbought_stocks(market: str = DEFAULT_MARKET, limit: int = DEFAULT_LIMIT):
+        """Get stocks with RSI > 70."""
+        return ScreenerService.get_technical_signals(market=market, signal_type="overbought", limit=limit)
+
+    @staticmethod
+    def get_low_pe_stocks(market: str = DEFAULT_MARKET, limit: int = DEFAULT_LIMIT, sector: str = None):
+        """Get stocks with lowest Trailing PE."""
+        return ScreenerService.get_fundamental_leaders(market=market, metric="trailing_pe", limit=limit, sector=sector)
+
+    @staticmethod
+    def get_high_market_cap_stocks(market: str = DEFAULT_MARKET, limit: int = DEFAULT_LIMIT, sector: str = None):
+        """Get stocks with highest Market Cap."""
+        return ScreenerService.get_fundamental_leaders(market=market, metric="market_cap", limit=limit, sector=sector)

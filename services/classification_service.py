@@ -211,3 +211,75 @@ class ClassificationService:
             return {"success": False, "error": str(e)}
         finally:
             session.close()
+    @staticmethod
+    def get_sector_list():
+        """Get list of unique sectors."""
+        session = SessionLocal()
+        try:
+            rows = session.query(SectorTaxonomy).order_by(SectorTaxonomy.name).all()
+            return {"success": True, "data": [{"code": r.code, "name": r.name} for r in rows]}
+        finally:
+            session.close()
+
+    @staticmethod
+    def get_industry_list(sector_code: str = None):
+        """Get list of industries, optionally filtered by sector."""
+        session = SessionLocal()
+        try:
+            q = session.query(IndustryTaxonomy)
+            if sector_code:
+                q = q.filter(IndustryTaxonomy.sector_code == sector_code)
+            rows = q.order_by(IndustryTaxonomy.name).all()
+            return {"success": True, "data": [{"code": r.code, "name": r.name, "sector_code": r.sector_code} for r in rows]}
+        finally:
+            session.close()
+    @staticmethod
+    def search_stocks_by_ticker(ticker: str, market: str = "sweden", limit: int = 10):
+        """Search stocks specifically by ticker symbol."""
+        session = SessionLocal()
+        try:
+            exchanges = _resolve_market(market)
+            q = session.query(Stock).filter(Stock.exchange.in_(exchanges))
+            q = q.filter(Stock.symbol.ilike(f"%{ticker.strip().upper()}%"))
+            rows = q.order_by(Stock.symbol.asc()).limit(limit).all()
+            return {"success": True, "count": len(rows), "data": [{"symbol": s.symbol, "name": s.name, "exchange": s.exchange} for s in rows]}
+        finally:
+            session.close()
+
+    @staticmethod
+    def search_stocks_by_name(name: str, market: str = "sweden", limit: int = 10):
+        """Search stocks specifically by company name."""
+        session = SessionLocal()
+        try:
+            exchanges = _resolve_market(market)
+            q = session.query(Stock).filter(Stock.exchange.in_(exchanges))
+            q = q.filter(Stock.name.ilike(f"%{name}%"))
+            rows = q.order_by(Stock.name.asc()).limit(limit).all()
+            return {"success": True, "count": len(rows), "data": [{"symbol": s.symbol, "name": s.name, "exchange": s.exchange} for s in rows]}
+        finally:
+            session.close()
+
+    @staticmethod
+    def search_stocks_by_profile(query: str, market: str = "sweden", limit: int = 20):
+        """Search stocks by keywords in their business description (core business)."""
+        session = SessionLocal()
+        try:
+            exchanges = _resolve_market(market)
+            q = session.query(Stock, CompanyProfile).join(CompanyProfile, CompanyProfile.stock_id == Stock.id)
+            q = q.filter(Stock.exchange.in_(exchanges))
+            q = q.filter(
+                (CompanyProfile.core_business.ilike(f"%{query}%")) |
+                (CompanyProfile.business_summary.ilike(f"%{query}%"))
+            )
+            rows = q.order_by(Stock.symbol.asc()).limit(limit).all()
+            data = []
+            for s, p in rows:
+                data.append({
+                    "symbol": s.symbol,
+                    "name": s.name,
+                    "exchange": s.exchange,
+                    "core_business": p.core_business[:200] + "..." if p.core_business else None
+                })
+            return {"success": True, "count": len(data), "data": data}
+        finally:
+            session.close()

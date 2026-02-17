@@ -247,3 +247,20 @@ class YahooService:
         except Exception as e:
             logger.error(f"[YAHOO:SEARCH] Error: {e}")
             return {"success": False, "error": str(e)}
+    @staticmethod
+    def get_dividend_yield(symbol: str) -> Dict[str, Any]:
+        """Get only the current dividend yield."""
+        res = YahooService.get_dividends(symbol)
+        if not res.get("success"): return res
+        return {
+            "success": True,
+            "symbol": symbol,
+            "dividendYield": res["data"].get("dividendYield"),
+            "payoutRatio": res["data"].get("payoutRatio")
+        }
+
+    @staticmethod
+    def get_dividend_history(symbol: str, period: str = "5y") -> Dict[str, Any]:
+        """Get dividend history for a period."""
+        # Current get_dividends already returns history, but we can limit/filter here if needed
+        return YahooService.get_dividends(symbol)

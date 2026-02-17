@@ -49,3 +49,29 @@ class AccountService:
                 "avgCost": p.avgCost
             })
         return {"success": True, "data": data}
+    @staticmethod
+    async def get_account_balance() -> Dict[str, Any]:
+        """Get total cash and net liquidation value."""
+        res = await AccountService.get_summary()
+        if not res.get("success"): return res
+        data = res["data"]
+        return {
+            "success": True,
+            "net_liquidation": data.get("NetLiquidation"),
+            "total_cash": data.get("TotalCashValue"),
+            "available_funds": data.get("AvailableFunds")
+        }
+
+    @staticmethod
+    async def get_margin_info() -> Dict[str, Any]:
+        """Get margin requirements and excess liquidity."""
+        res = await AccountService.get_summary()
+        if not res.get("success"): return res
+        data = res["data"]
+        return {
+            "success": True,
+            "init_margin": data.get("InitMarginReq"),
+            "maint_margin": data.get("MaintMarginReq"),
+            "excess_liquidity": data.get("ExcessLiquidity"),
+            "cushion": data.get("Cushion")
+        }

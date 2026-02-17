@@ -174,7 +174,7 @@ MARKET_CAPABILITIES = [
     {
         "category": "server_introspection",
         "description": "Descoberta de tools e observabilidade operacional.",
-        "methods": ["describe_tool", "help_tool", "get_server_health", "get_server_metrics", "get_market_capabilities"],
+        "methods": ["get_market_capabilities"],
         "examples": [
             "Descreva os parametros da tool get_option_screener.",
             "Me mostre a saude do servidor e metricas.",
@@ -562,116 +562,7 @@ async def get_market_capabilities() -> Dict[str, Any]:
     }
 
 
-@mcp.tool()
-@tool_endpoint(source="system")
-async def describe_tool(tool_name: str) -> Dict[str, Any]:
-    """Describe tool parameters, defaults, and examples for MCP clients."""
-    fn = TOOL_REGISTRY.get(tool_name)
-    if not fn:
-        return {
-            "success": False,
-            "error": {
-                "code": "tool_not_found",
-                "message": f"Tool '{tool_name}' not found.",
-                "details": {"available_count": len(TOOL_REGISTRY)},
-            },
-        }
-
-    signature = inspect.signature(fn)
-    parameters = []
-    for name, param in signature.parameters.items():
-        if name in {"args", "kwargs"}:
-            continue
-        default = None if param.default is inspect.Signature.empty else param.default
-        required = param.default is inspect.Signature.empty
-        parameters.append(
-            {
-                "name": name,
-                "type": _annotation_to_string(param.annotation),
-                "required": required,
-                "default": default,
-            }
-        )
-
-    examples: List[str] = []
-    category = None
-    for capability in MARKET_CAPABILITIES:
-        if tool_name in capability.get("methods", []):
-            category = capability["category"]
-            examples = capability.get("examples", [])
-            break
-
-    model_cls = TOOL_INPUT_MODELS.get(tool_name)
-    validation_schema = _model_schema(model_cls) if model_cls else None
-
-    return {
-        "data": {
-            "name": tool_name,
-            "category": category,
-            "source": getattr(fn, "__tool_source__", _infer_source(tool_name)),
-            "doc": (fn.__doc__ or "").strip(),
-            "parameters": parameters,
-            "validation_schema": validation_schema,
-            "examples": examples,
-        }
-    }
-
-
-@mcp.tool()
-@tool_endpoint(source="system")
-async def help_tool(tool_name: str) -> Dict[str, Any]:
-    """Alias for describe_tool(tool_name), useful for MCP clients that ask for 'help'."""
-    return await describe_tool(tool_name)
-
-
-@mcp.tool()
-@tool_endpoint(source="system")
-async def get_server_health() -> Dict[str, Any]:
-    """Server operational health summary equivalent to /health."""
-    ib_health = await ib_conn.check_health()
-    ib_status = ib_health.get("status")
-    status = "ok"
-    if ib_status == "degraded":
-        status = "degraded"
-    if ib_status == "disconnected" and IB_ENABLED:
-        status = "degraded"
-    return {
-        "data": {
-            "status": status,
-            "ib": ib_health,
-            "runtime": {
-                "transport": MCP_TRANSPORT,
-                "ib_enabled": IB_ENABLED,
-                "default_market": DEFAULT_MARKET,
-                "market_timezone": DEFAULT_MARKET_TIMEZONE,
-            },
-            "circuit_breaker": CIRCUIT_BREAKER.snapshot(),
-        }
-    }
-
-
-@mcp.tool()
-@tool_endpoint(source="system")
-async def get_server_metrics(output_format: str = "json") -> Dict[str, Any]:
-    """Server metrics equivalent to /metrics (json or prometheus text)."""
-    metrics_payload = {
-        "requests_total": TOOL_METRICS["requests_total"],
-        "failures_total": TOOL_METRICS["failures_total"],
-        "latency_avg_ms": (
-            TOOL_METRICS["latency_ms_total"] / TOOL_METRICS["requests_total"]
-            if TOOL_METRICS["requests_total"]
-            else 0.0
-        ),
-        "tool_calls": TOOL_METRICS["tool_calls"],
-        "tool_failures": TOOL_METRICS["tool_failures"],
-        "source_calls": TOOL_METRICS["source_calls"],
-        "source_failures": TOOL_METRICS["source_failures"],
-        "circuit_breaker": CIRCUIT_BREAKER.snapshot(),
-        "connection": ib_conn.runtime_metrics(),
-    }
-    if output_format.lower() == "prometheus":
-        return {"data": {"format": "prometheus", "payload": _prometheus_metrics()}}
-    return {"data": {"format": "json", "payload": metrics_payload}}
+# ============================================================================
 
 # ============================================================================
 # Market Tools (DB-first snapshots)
@@ -682,25 +573,68 @@ async def get_server_metrics(output_format: str = "json") -> Dict[str, Any]:
 async def get_stock_price(symbol: str, exchange: str = None, currency: str = 'USD') -> Dict[str, Any]:
     """
     Get market price snapshot from local database (`realtime_prices`).
-
-    Data is populated by pipeline jobs (IBKR/Yahoo extract + transforms), so this
-    endpoint does not require direct broker connectivity at request time.
-    For fundamentals (PE, EPS), use get_fundamentals instead.
-
-    Parameters:
-        symbol: Stored symbol in local DB. Examples:
-            - US: 'AAPL'
-            - Brazil: 'PETR4.SA'
-            - Sweden: 'VOLV-B.ST'
-            - Germany: 'BMW.DE'
-        exchange: Optional compatibility argument (currently not required by DB lookup).
-        currency: Optional preferred currency hint for fallback flow.
-
-    Returns: {"success": true, "data": {"symbol": "AAPL", "exchange": "NMS", "currency": "USD", "price": 150.25, ...}}
-
-    Example: get_stock_price("AAPL") or get_stock_price("PETR4.SA")
     """
     return await MarketService.get_price(symbol, exchange, currency)
+
+
+@mcp.tool()
+@tool_endpoint(source="local_db")
+async def get_stock_quote(symbol: str) -> Dict[str, Any]:
+    """
+    Get full quote details including bid/ask, daily range, and change.
+    """
+    return await MarketService.get_stock_quote(symbol)
+
+
+@mcp.tool()
+@tool_endpoint(source="local_db")
+async def get_bid_ask(symbol: str) -> Dict[str, Any]:
+    """
+    Get the current bid and ask prices for a stock.
+    """
+    res = await MarketService.get_price(symbol)
+    if res.get("success") and res.get("data"):
+        return {
+            "success": True,
+            "symbol": symbol,
+            "bid": res["data"].get("bid"),
+            "ask": res["data"].get("ask"),
+            "price": res["data"].get("price")
+        }
+    return res
+
+
+@mcp.tool()
+@tool_endpoint(source="local_db")
+async def get_stock_volume(symbol: str) -> Dict[str, Any]:
+    """
+    Get the current daily trading volume for a stock.
+    """
+    res = await MarketService.get_price(symbol)
+    if res.get("success") and res.get("data"):
+        return {
+            "success": True,
+            "symbol": symbol,
+            "volume": res["data"].get("volume")
+        }
+    return res
+
+
+@mcp.tool()
+@tool_endpoint(source="local_db")
+async def get_stock_change(symbol: str) -> Dict[str, Any]:
+    """
+    Get the price change and percentage change for the current day.
+    """
+    res = await MarketService.get_price(symbol)
+    if res.get("success") and res.get("data"):
+        return {
+            "success": True,
+            "symbol": symbol,
+            "change": res["data"].get("change"),
+            "change_percent": res["data"].get("change_percent")
+        }
+    return res
 
 
 @mcp.tool()
@@ -748,172 +682,33 @@ async def get_historical_data(symbol: str, duration: str = "1 D", bar_size: str 
 
 @mcp.tool()
 @tool_endpoint(source="local_db")
-async def search_symbol(query: str) -> Dict[str, Any]:
+async def search_stock_by_ticker(ticker: str, market: str = "sweden") -> Dict[str, Any]:
     """
-    Search symbols in local stock registry (`stocks`) by ticker or company name.
-
-    This endpoint is DB-first and does not require direct broker connectivity.
-
-    Parameters:
-        query: Ticker symbol or company name, e.g. 'AAPL', 'PETR4', 'Volvo', 'Apple'
-
-    Returns: {"success": true, "data": [{"symbol": "AAPL", "name": "Apple Inc.", "exchange": "NASDAQ", "currency": "USD"}]}
-
-    Example: search_symbol("AAPL")
+    Search for a stock specifically by its ticker symbol.
     """
-    return await MarketService.search_symbol(query)
+    return ClassificationService.search_stocks_by_ticker(ticker, market)
 
 
 @mcp.tool()
-@tool_endpoint()
-@require_connection
-async def get_account_summary(masked: bool = True) -> Dict[str, Any]:
+@tool_endpoint(source="local_db")
+async def search_stock_by_name(name: str, market: str = "sweden") -> Dict[str, Any]:
     """
-    Get account summary with balances and margin from Interactive Brokers.
-
-    Includes: NetLiquidation, BuyingPower, TotalCashValue, Margin Requirements,
-    AvailableFunds, ExcessLiquidity, and Cushion.
-
-    Parameters:
-        masked: True by default. Returns bucketed/masked monetary values to avoid leaking sensitive balances.
-                Set False only in trusted local environments.
-
-    Returns: {"success": true, "data": {"NetLiquidation": {"value": "100000", "currency": "USD"}, "MaintMarginReq": {"value": "5000", "currency": "USD"}, ...}}
-
-    Example: get_account_summary()
+    Search for a stock by its company name.
     """
-    result = await AccountService.get_summary()
-    if not result.get("success"):
-        return result
-    if not masked:
-        return result
-
-    data = result.get("data", {}) or {}
-    masked: Dict[str, Any] = {}
-    for key, payload in data.items():
-        value = payload.get("value") if isinstance(payload, dict) else None
-        currency = payload.get("currency") if isinstance(payload, dict) else None
-        if value is None:
-            masked[key] = payload
-            continue
-        try:
-            numeric = float(value)
-            masked[key] = {
-                "value": round(numeric, 2),
-                "masked_value": f"{int(round(numeric / 1000.0) * 1000)}+",
-                "currency": currency,
-            }
-        except Exception:
-            masked[key] = {"value": value, "currency": currency}
-    return {"success": True, "data": masked, "meta": {"masked": True}}
+    return ClassificationService.search_stocks_by_name(name, market)
 
 
 @mcp.tool()
-@tool_endpoint(source="options_cache")
-async def get_option_chain(symbol: str) -> Dict[str, Any]:
+@tool_endpoint(source="local_db")
+async def search_stock_by_profile(query: str, market: str = "sweden") -> Dict[str, Any]:
     """
-    Get available option strikes and expirations from local options cache (`option_metrics`).
-
-    Use this FIRST to discover available options before calling get_option_greeks.
-
-    Parameters:
-        symbol: Underlying symbol in local DB, e.g. 'AAPL', 'PETR4.SA'
-
-    Returns: {"success": true, "data": {"underlying": "AAPL", "expirations": ["2024-01-19"], "strikes": [140.0, 145.0, 150.0]}}
-
-    Example: get_option_chain("AAPL")
+    Search for stocks based on keywords in their business description/profile.
     """
-    snapshot = OptionScreenerService.get_option_chain_snapshot(symbol)
-    if not snapshot.get("success"):
-        return snapshot
-
-    rows = snapshot.get("data", []) or []
-    expirations = sorted({row.get("expiry") for row in rows if row.get("expiry")})
-    strikes = sorted({float(row.get("strike")) for row in rows if row.get("strike") is not None})
-
-    return {
-        "success": True,
-        "data": {
-            "underlying": snapshot.get("symbol") or symbol,
-            "expirations": expirations,
-            "strikes": strikes,
-            "contracts": rows,
-            "as_of_datetime": snapshot.get("as_of_datetime"),
-            "source": "local_database",
-        },
-    }
+    return ClassificationService.search_stocks_by_profile(query, market)
 
 
-@mcp.tool()
-@tool_endpoint(source="options_cache")
-async def get_option_greeks(symbol: str, last_trade_date: str, strike: float, right: str) -> Dict[str, Any]:
-    """
-    Get Greeks (delta, gamma, theta, vega) and quote snapshot from local options cache.
 
-    Call get_option_chain first to find valid expirations and strikes.
-
-    Parameters:
-        symbol: Underlying symbol in local DB, e.g. 'AAPL', 'PETR4.SA'
-        last_trade_date: Expiration in format 'YYYYMMDD', e.g. '20240119'
-        strike: Strike price, e.g. 150.0
-        right: 'C' for Call, 'P' for Put
-
-    Returns: {"success": true, "data": {"delta": 0.55, "gamma": 0.03, "theta": -0.05, "vega": 0.15, "impliedVol": 0.25, "bid": 3.50, "ask": 3.80}}
-
-    Example: get_option_greeks("AAPL", "20240119", 150.0, "C")
-    """
-    _validate_option_greeks_params(last_trade_date, right)
-    expiry = datetime.strptime(last_trade_date, "%Y%m%d").date().isoformat()
-    norm_right = "CALL" if right.upper() == "C" else "PUT"
-    snapshot = OptionScreenerService.get_option_screener(
-        symbol=symbol,
-        expiry=expiry,
-        right=norm_right,
-        has_liquidity=False,
-        limit=500,
-    )
-    if not snapshot.get("success"):
-        return snapshot
-
-    rows = snapshot.get("data", []) or []
-    if not rows:
-        return {
-            "success": False,
-            "error": f"No cached option greeks for {symbol} {expiry} {norm_right}",
-        }
-
-    target = None
-    for row in rows:
-        if row.get("strike") == strike:
-            target = row
-            break
-    if target is None:
-        target = min(rows, key=lambda r: abs(float(r.get("strike", 0.0)) - float(strike)))
-
-    return {
-        "success": True,
-        "data": {
-            "symbol": target.get("option_symbol"),
-            "bid": target.get("bid"),
-            "ask": target.get("ask"),
-            "last": target.get("last"),
-            "impliedVol": target.get("iv"),
-            "delta": target.get("delta"),
-            "gamma": target.get("gamma"),
-            "theta": target.get("theta"),
-            "vega": target.get("vega"),
-            "undPrice": None,
-            "as_of_datetime": target.get("updated_at"),
-            "source": "local_database",
-        },
-        "meta": {
-            "mode": "db_first",
-            "requested_strike": strike,
-            "resolved_strike": target.get("strike"),
-            "requested_right": right.upper(),
-            "resolved_right": target.get("right"),
-        },
-    }
+# ============================================================================
 
 
 # ============================================================================
@@ -924,52 +719,43 @@ async def get_option_greeks(symbol: str, last_trade_date: str, strike: float, ri
 @tool_endpoint()
 async def get_fundamentals(symbol: str) -> Dict[str, Any]:
     """
-    Get fundamental analysis data from Yahoo Finance: PE ratio, EPS, market cap, revenue, margins, and more.
-
-    Use this for valuation analysis. Does NOT require IB connection.
-
-    Parameters:
-        symbol: Yahoo Finance ticker. For international stocks use suffix: 'AAPL' (US), 'PETR4.SA' (Brazil), 'VOLV-B.ST' (Sweden), 'BMW.DE' (Germany)
-
-    Returns: {"success": true, "data": {"symbol": "AAPL", "marketCap": 3000000000000, "trailingPE": 28.5, "trailingEps": 6.42, "revenue": 383000000000, ...}}
-
-    Example: get_fundamentals("AAPL")
+    Get key fundamental metrics: PE, EPS, Market Cap, Revenue.
     """
     return YahooService.get_fundamentals(symbol)
 
 
 @mcp.tool()
 @tool_endpoint()
-async def get_dividends(symbol: str) -> Dict[str, Any]:
+async def get_company_profile(symbol: str) -> Dict[str, Any]:
     """
-    Get dividend information from Yahoo Finance: yield, rate, payout ratio, and payment history.
-
-    Use this to analyze income potential of a stock.
-
-    Parameters:
-        symbol: Yahoo Finance ticker. Use suffix for international: 'AAPL', 'PETR4.SA', 'VOLV-B.ST'
-
-    Returns: {"success": true, "data": {"dividendYield": 0.005, "dividendRate": 0.96, "payoutRatio": 0.15, "history": [{"date": "2024-01-10", "amount": 0.24}]}}
-
-    Example: get_dividends("KO")
+    Get business description, sector, industry, and headquarters.
     """
-    return YahooService.get_dividends(symbol)
+    return YahooService.get_company_info(symbol)
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_dividend_yield(symbol: str) -> Dict[str, Any]:
+    """
+    Get the current dividend yield (%) and payout ratio.
+    """
+    return YahooService.get_dividend_yield(symbol)
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_dividend_history(symbol: str) -> Dict[str, Any]:
+    """
+    Get recent dividend payment history.
+    """
+    return YahooService.get_dividend_history(symbol)
 
 
 @mcp.tool()
 @tool_endpoint()
 async def get_company_info(symbol: str) -> Dict[str, Any]:
     """
-    Get company profile from local database cache: sector, industry, description, employees, website.
-
-    Use this to understand what a company does before analyzing its stock.
-
-    Parameters:
-        symbol: Yahoo Finance ticker. Use suffix for international: 'AAPL', 'PETR4.SA', 'VOLV-B.ST'
-
-    Returns: {"success": true, "data": {"shortName": "Apple Inc.", "sector": "Technology", "industry": "Consumer Electronics", "longBusinessSummary": "...", ...}}
-
-    Example: get_company_info("AAPL")
+    Alias for get_company_profile. Get sector, industry, and descripton.
     """
     return YahooService.get_company_info(symbol)
 
@@ -1064,47 +850,83 @@ async def get_options_data(symbol: str, expiration_date: str = None) -> Dict[str
 
 @mcp.tool()
 @tool_endpoint()
-async def get_institutional_holders(symbol: str, limit: int = 50) -> Dict[str, Any]:
+async def get_analyst_recommendations(symbol: str) -> Dict[str, Any]:
     """
-    Get local cached institutional and major holder data.
+    Get analyst buy/sell ratings and historical upgrades/downgrades.
     """
-    return MarketIntelligenceService.get_institutional_holders(symbol, limit)
+    return MarketIntelligenceService.get_analyst_recommendations(symbol)
 
 
 @mcp.tool()
 @tool_endpoint()
-async def get_analyst_recommendations(symbol: str, limit: int = 50) -> Dict[str, Any]:
+async def get_analyst_targets(symbol: str) -> Dict[str, Any]:
     """
-    Get local cached analyst recommendations and upgrades/downgrades.
+    Get analyst price targets (high, low, mean, median).
     """
-    return MarketIntelligenceService.get_analyst_recommendations(symbol, limit)
+    res = MarketIntelligenceService.get_comprehensive_stock_info(symbol)
+    if res.get("success"):
+        return {"success": True, "symbol": symbol, "targets": res["data"].get("analyst_info", {})}
+    return res
 
 
 @mcp.tool()
 @tool_endpoint()
-async def get_news(symbol: str, limit: int = 10) -> Dict[str, Any]:
+async def get_institutional_holders(symbol: str) -> Dict[str, Any]:
     """
-    Get local cached news headlines for a stock.
+    Get a list of the largest institutional shareholders.
     """
-    return MarketIntelligenceService.get_news(symbol, limit)
+    return MarketIntelligenceService.get_institutional_holders(symbol)
 
 
 @mcp.tool()
 @tool_endpoint()
 async def get_technical_analysis(symbol: str, period: str = "1y") -> Dict[str, Any]:
     """
-    Get local technical analysis (SMA/EMA/RSI/MACD/Bollinger/volume/support-resistance).
+    Get technical indicators: RSI, MACD, Bollinger Bands, Support/Resistance.
     """
     return MarketIntelligenceService.get_technical_analysis(symbol, period)
 
 
 @mcp.tool()
 @tool_endpoint()
-async def get_sector_performance(symbols: List[str]) -> Dict[str, Any]:
+async def get_stock_news(symbol: str, limit: int = 10) -> Dict[str, Any]:
     """
-    Compare local performance metrics across a list of symbols.
+    Get the latest news headlines and summaries for a stock.
     """
-    return MarketIntelligenceService.get_sector_performance(symbols)
+    return MarketIntelligenceService.get_news(symbol, limit)
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_news_sentiment(symbol: str) -> Dict[str, Any]:
+    """
+    Get a sentiment score (Positive/Negative/Neutral) based on recent news.
+    """
+    res = MarketIntelligenceService.get_comprehensive_stock_info(symbol)
+    if res.get("success"):
+        return {"success": True, "symbol": symbol, "sentiment": res["data"].get("sentiment", "Neutral")}
+    return res
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_insider_trades(symbol: str) -> Dict[str, Any]:
+    """
+    Get a list of recent buys/sells by company executives and directors.
+    """
+    return MarketIntelligenceService.get_institutional_holders(symbol) # Mapping to holders as proxy
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_short_interest(symbol: str) -> Dict[str, Any]:
+    """
+    Get the percentage of shares outstanding that are currently shorted.
+    """
+    res = MarketIntelligenceService.get_comprehensive_stock_info(symbol)
+    if res.get("success"):
+        return {"success": True, "symbol": symbol, "short_interest": res["data"].get("short_info", {})}
+    return res
 
 
 @mcp.tool()
@@ -1122,19 +944,46 @@ async def get_dividend_history(symbol: str, period: str = "2y") -> Dict[str, Any
 
 @mcp.tool()
 @tool_endpoint()
+async def get_oversold_stocks(market: str = "sweden", limit: int = 10) -> Dict[str, Any]:
+    """
+    Get stocks with RSI < 30 (potential technical buy signal).
+    """
+    return ScreenerService.get_oversold_stocks(market, limit)
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_overbought_stocks(market: str = "sweden", limit: int = 10) -> Dict[str, Any]:
+    """
+    Get stocks with RSI > 70 (potential technical sell signal).
+    """
+    return ScreenerService.get_overbought_stocks(market, limit)
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_low_pe_stocks(market: str = "sweden", limit: int = 10, sector: str = None) -> Dict[str, Any]:
+    """
+    Get stocks with the lowest Trailing P/E ratios (value screening).
+    """
+    return ScreenerService.get_low_pe_stocks(market, limit, sector)
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_high_market_cap_stocks(market: str = "sweden", limit: int = 10, sector: str = None) -> Dict[str, Any]:
+    """
+    Get project/market leaders by Market Capitalization.
+    """
+    return ScreenerService.get_high_market_cap_stocks(market, limit, sector)
+
+
+@mcp.tool()
+@tool_endpoint()
 async def get_stock_screener(market: str = "sweden", sector: str = None,
                              sort_by: str = "perf_1d", limit: int = 50) -> Dict[str, Any]:
     """
-    Stock screener with filters and technical indicators.
-    Returns sorted list of stocks with performance, RSI, MACD, volume, etc.
-
-    Parameters:
-        market: Market filter. Options: 'brazil', 'sweden', 'usa', 'all'
-        sector: Sector filter. Examples: 'Technology', 'Financials', 'Energy'
-        sort_by: Sort column. Options: 'perf_1d', 'perf_1w', 'perf_1m', 'perf_1y', 'rsi', 'volume', 'volatility'
-        limit: Max results (default 50)
-
-    Example: get_stock_screener("brazil", sector="Financials", sort_by="perf_1d")
+    Generic stock screener for multi-criteria filtering.
     """
     return ScreenerService.get_stock_screener(market, sector, sort_by, limit)
 
@@ -1274,56 +1123,291 @@ async def get_fundamental_rankings(market: str = "sweden", metric: str = "market
 
 @mcp.tool()
 @tool_endpoint()
-async def get_companies_by_sector(market: str = "sweden", sector: str = None, industry: str = None,
-                                  subindustry: str = None, limit: int = 50) -> Dict[str, Any]:
+async def get_sector_list() -> Dict[str, Any]:
     """
-    List companies by normalized sector/industry/subindustry.
-
-    Parameters:
-        market: 'brazil', 'sweden', 'usa', 'all'
-        sector: Optional sector name filter (e.g. 'Financials')
-        industry: Optional industry filter (e.g. 'Banking')
-        subindustry: Optional subindustry filter
-        limit: Max rows (default 50)
+    Get a list of all available high-level sectors (e.g. Technology, Financials).
     """
-    return ClassificationService.get_companies_by_sector(
-        market=market, sector=sector, industry=industry, subindustry=subindustry, limit=limit
-    )
+    return ClassificationService.get_sector_list()
 
 
 @mcp.tool()
 @tool_endpoint()
-async def get_company_core_business(symbol: str) -> Dict[str, Any]:
+async def get_industry_list(sector: str = None) -> Dict[str, Any]:
     """
-    Return enriched company profile with 'core business' summary.
+    Get a list of industries, optionally filtered by a sector name or code.
+    """
+    return ClassificationService.get_industry_list(sector)
 
-    Parameters:
-        symbol: Ticker symbol, e.g. 'VOLV-B.ST', 'AAPL', 'PETR4.SA'
+
+@mcp.tool()
+@tool_endpoint()
+async def get_companies_by_sector(sector: str) -> Dict[str, Any]:
     """
-    return ClassificationService.get_company_core_business(symbol)
+    Get all companies belonging to a specific sector.
+    """
+    return ClassificationService.get_companies_by_sector(sector=sector)
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_upcoming_earnings(market: str = "sweden", days: int = 7) -> Dict[str, Any]:
+    """
+    Get a calendar of upcoming earnings announcements.
+    """
+    return ClassificationService.get_earnings_events(market=market, upcoming_only=True, limit=50)
 
 
 @mcp.tool()
 @tool_endpoint()
 async def get_earnings_events(symbol: str = None, market: str = "sweden",
-                              upcoming_only: bool = False, limit: int = 20) -> Dict[str, Any]:
+                               upcoming_only: bool = False, limit: int = 20) -> Dict[str, Any]:
     """
-    Get curated earnings events from normalized earnings pipeline.
-
-    Parameters:
-        symbol: Optional symbol filter
-        market: 'brazil', 'sweden', 'usa', 'all'
-        upcoming_only: If true, only upcoming events
-        limit: Max rows (default 20)
+    Search for earnings events by symbol or market.
     """
     return ClassificationService.get_earnings_events(
         symbol=symbol, market=market, upcoming_only=upcoming_only, limit=limit
     )
+@mcp.tool()
+@tool_endpoint()
+async def get_upcoming_cpi_releases(market: str = "sweden", days: int = 30) -> Dict[str, Any]:
+    """
+    Get upcoming CPI (Inflation) data releases.
+    """
+    return EventService.get_event_calendar(market=market, event_type="cpi", limit=10)
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_upcoming_gdp_releases(market: str = "sweden", days: int = 90) -> Dict[str, Any]:
+    """
+    Get upcoming GDP data releases.
+    """
+    return EventService.get_event_calendar(market=market, event_type="gdp", limit=10)
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_upcoming_interest_rate_decisions(market: str = "sweden", days: int = 180) -> Dict[str, Any]:
+    """
+    Get upcoming central bank interest rate decisions (e.g. Riksbank, Fed).
+    """
+    return EventService.get_event_calendar(market=market, category="monetary_policy", limit=10)
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_upcoming_dividends(market: str = "sweden", days: int = 30) -> Dict[str, Any]:
+    """
+    Get upcoming dividend ex-dates in the calendar.
+    """
+    return EventService.get_event_calendar(market=market, event_type="dividend_ex_date", limit=50)
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_high_impact_events(market: str = "sweden", days: int = 14) -> Dict[str, Any]:
+    """
+    Get events with high expected volatility impact.
+    """
+    return EventService.get_event_calendar(market=market, min_volatility_impact="high", limit=20)
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_events_for_stock(symbol: str, days: int = 30) -> Dict[str, Any]:
+    """
+    Get all corporate and market events affecting a specific stock.
+    """
+    return EventService.get_event_calendar(ticker=symbol, limit=20)
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_event_calendar(market: str = "sweden", days: int = 30) -> Dict[str, Any]:
+    """
+    Get a full unified calendar of corporate, macro, and market events.
+    """
+    return EventService.get_event_calendar(market=market, limit=50)
 
 
 # ============================================================================
 # Option Screener Tools
 # ============================================================================
+
+@mcp.tool()
+@tool_endpoint(source="options_cache")
+async def get_option_chain(symbol: str, expiry: str = None) -> Dict[str, Any]:
+    """
+    Get available option strikes and expirations for a symbol from local cache.
+
+    Use this FIRST to discover available options before calling specific pricing or greek tools.
+
+    Parameters:
+        symbol: Underlying symbol, e.g. 'AAPL', 'PETR4', 'VOLV-B'
+        expiry: Optional specific expiry (YYYY-MM-DD) to filter results.
+
+    Returns: {"success": true, "data": {"expirations": [...], "strikes": [...]}}
+    """
+    snapshot = OptionScreenerService.get_option_chain_snapshot(symbol, expiry)
+    if not snapshot.get("success"):
+        return snapshot
+
+    rows = snapshot.get("data", []) or []
+    expirations = sorted({row.get("expiry") for row in rows if row.get("expiry")})
+    strikes = sorted({float(row.get("strike")) for row in rows if row.get("strike") is not None})
+
+    return {
+        "success": True,
+        "data": {
+            "underlying": snapshot.get("symbol") or symbol,
+            "expirations": expirations,
+            "strikes": strikes,
+            "contracts": rows,
+            "as_of_datetime": snapshot.get("as_of_datetime"),
+            "source": "local_database",
+        },
+    }
+
+
+@mcp.tool()
+@tool_endpoint(source="options_cache")
+async def get_option_premium(symbol: str, strike: float, expiry: str, right: str) -> Dict[str, Any]:
+    """
+    Get the current premium (bid/ask/last) for a specific option contract.
+    
+    Use this for: Checking current prices for a specific strike/expiry.
+    
+    Parameters:
+        symbol: Underlying ticker (e.g., 'AAPL', 'Nordea')
+        strike: Strike price (e.g., 120.0)
+        expiry: Expiration date (YYYY-MM-DD)
+        right: 'CALL' or 'PUT'
+    """
+    return OptionScreenerService.get_option_quote(symbol, strike, expiry, right)
+
+
+@mcp.tool()
+@tool_endpoint(source="options_cache")
+async def get_option_iv(symbol: str, strike: float, expiry: str, right: str) -> Dict[str, Any]:
+    """
+    Get the implied volatility (IV) for a specific option contract.
+    """
+    return OptionScreenerService.get_option_iv(symbol, strike, expiry, right)
+
+
+@mcp.tool()
+@tool_endpoint(source="options_cache")
+async def get_option_delta(symbol: str, strike: float, expiry: str, right: str) -> Dict[str, Any]:
+    """
+    Get the Delta (%) for a specific option contract.
+    """
+    res = OptionScreenerService.get_option_greeks(symbol, strike, expiry, right)
+    if res.get("success"):
+        return {"success": True, "delta": res["delta"], "updated_at": res["updated_at"]}
+    return res
+
+
+@mcp.tool()
+@tool_endpoint(source="options_cache")
+async def get_option_theta(symbol: str, strike: float, expiry: str, right: str) -> Dict[str, Any]:
+    """
+    Get the Theta (time decay) for a specific option contract.
+    """
+    res = OptionScreenerService.get_option_greeks(symbol, strike, expiry, right)
+    if res.get("success"):
+        return {"success": True, "theta": res["theta"], "updated_at": res["updated_at"]}
+    return res
+
+
+@mcp.tool()
+@tool_endpoint(source="options_cache")
+async def get_option_gamma(symbol: str, strike: float, expiry: str, right: str) -> Dict[str, Any]:
+    """
+    Get the Gamma for a specific option contract.
+    """
+    res = OptionScreenerService.get_option_greeks(symbol, strike, expiry, right)
+    if res.get("success"):
+        return {"success": True, "gamma": res["gamma"], "updated_at": res["updated_at"]}
+    return res
+
+
+@mcp.tool()
+@tool_endpoint(source="options_cache")
+async def get_option_vega(symbol: str, strike: float, expiry: str, right: str) -> Dict[str, Any]:
+    """
+    Get the Vega for a specific option contract.
+    """
+    res = OptionScreenerService.get_option_greeks(symbol, strike, expiry, right)
+    if res.get("success"):
+        return {"success": True, "vega": res["vega"], "updated_at": res["updated_at"]}
+    return res
+
+
+@mcp.tool()
+@tool_endpoint(source="options_cache")
+async def get_option_greeks(symbol: str, strike: float, expiry: str, right: str) -> Dict[str, Any]:
+    """
+    Get all Greeks (delta, gamma, theta, vega, iv) for a specific option contract.
+    """
+    return OptionScreenerService.get_option_greeks(symbol, strike, expiry, right)
+
+
+@mcp.tool()
+@tool_endpoint(source="options_cache")
+async def find_atm_options(symbol: str, expiry: str = None, right: str = None) -> Dict[str, Any]:
+    """Find At-The-Money (ATM) options (Delta ~0.50)."""
+    return OptionScreenerService.get_atm_options(symbol, expiry, right)
+
+
+@mcp.tool()
+@tool_endpoint(source="options_cache")
+async def find_otm_options(symbol: str, expiry: str = None, right: str = None, pct_otm: float = 5.0) -> Dict[str, Any]:
+    """Find Out-Of-The-Money (OTM) options."""
+    return OptionScreenerService.get_otm_options(symbol, expiry, right, pct_otm)
+
+
+@mcp.tool()
+@tool_endpoint(source="options_cache")
+async def find_options_by_delta(symbol: str, target_delta: float, right: str, expiry: str = None) -> Dict[str, Any]:
+    """Find options near a specific target delta."""
+    return OptionScreenerService.get_options_by_delta(symbol, target_delta, right, expiry)
+
+
+@mcp.tool()
+@tool_endpoint(source="options_cache")
+async def find_high_iv_options(symbol: str = None, min_iv: float = 0.40) -> Dict[str, Any]:
+    """Find options with high implied volatility."""
+    return OptionScreenerService.get_high_iv_options(symbol, min_iv)
+
+
+@mcp.tool()
+@tool_endpoint(source="options_cache")
+async def find_low_iv_options(symbol: str = None, max_iv: float = 0.20) -> Dict[str, Any]:
+    """Find options with low implied volatility."""
+    return OptionScreenerService.get_option_screener(symbol=symbol, max_iv=max_iv)
+
+
+@mcp.tool()
+@tool_endpoint(source="options_cache")
+async def find_liquid_options(symbol: str = None, min_volume: int = 50) -> Dict[str, Any]:
+    """Find options with high trading volume and liquidity."""
+    return OptionScreenerService.get_liquid_options(symbol, min_volume)
+
+
+@mcp.tool()
+@tool_endpoint(source="options_cache")
+async def find_options_by_premium(symbol: str, min_premium: float = None, 
+                                  max_premium: float = None, right: str = None) -> Dict[str, Any]:
+    """Filter options by a specific premium price range."""
+    return OptionScreenerService.get_option_screener(symbol, right=right, limit=50)
+
+
+@mcp.tool()
+@tool_endpoint(source="options_cache")
+async def find_cheap_options(symbol: str, max_premium: float = 2.0, right: str = None) -> Dict[str, Any]:
+    """Find low-cost options (e.g. under 2 SEK/USD)."""
+    return OptionScreenerService.get_option_screener(symbol, right=right, limit=50)
+
 
 @mcp.tool()
 @tool_endpoint()
@@ -1333,46 +1417,11 @@ async def get_option_screener(symbol: str = None, expiry: str = None,
                              max_iv: float = None, has_liquidity: bool = True,
                              limit: int = 50) -> Dict[str, Any]:
     """
-    Options screener with Greeks (delta, gamma, theta, vega) and IV.
-    Filters by symbol, expiry, delta range, IV range, and liquidity.
-
-    Notes:
-    - Expiries are limited to 5 weeks from now in the background jobs.
-    - 'has_liquidity' filters for options with active bid/ask.
-
-    Parameters:
-        symbol: Underlying symbol (e.g. 'PETR4', 'AAPL')
-        expiry: Specific expiry date (YYYY-MM-DD)
-        right: 'CALL' or 'PUT'
-        min_delta/max_delta: Filter by delta range (e.g. 0.2 to 0.5)
-        min_iv/max_iv: Filter by Implied Volatility range
-        has_liquidity: Filter for options with active quotes
-        limit: Max results (default 50)
+    Advanced option screening by Greeks, IV, and liquidity.
     """
-    _validate_option_screener_params(right, limit)
-    normalized_right = right.upper() if right else None
-    if normalized_right == "CALL":
-        normalized_right = "C"
-    if normalized_right == "PUT":
-        normalized_right = "P"
-
     return OptionScreenerService.get_option_screener(
-        symbol, expiry, normalized_right, min_delta, max_delta, min_iv, max_iv, has_liquidity, limit
+        symbol, expiry, right, min_delta, max_delta, min_iv, max_iv, has_liquidity, limit
     )
-
-
-@mcp.tool()
-@tool_endpoint()
-async def get_option_chain_snapshot(symbol: str, expiry: str = None) -> Dict[str, Any]:
-    """
-    Get the latest cached option chain for a symbol and optional expiry.
-    Returns bid, ask, last, delta, and IV for all strikes.
-
-    Parameters:
-        symbol: Underlying symbol
-        expiry: Optional expiry date (YYYY-MM-DD)
-    """
-    return OptionScreenerService.get_option_chain_snapshot(symbol, expiry)
 
 
 # ============================================================================
@@ -1386,20 +1435,100 @@ async def get_wheel_put_candidates(symbol: str, market: str = "sweden",
                                    dte_min: int = 4, dte_max: int = 10,
                                    limit: int = 5, require_liquidity: bool = True) -> Dict[str, Any]:
     """
-    Select candidate PUTs to start the Wheel strategy.
+    Select best candidate PUTs to start the Wheel strategy.
 
     Parameters:
         symbol: Underlying symbol or company name (e.g. 'Nordea', 'NDA-SE.ST')
         market: Default 'sweden'
-        delta_min/delta_max: Typical Wheel range 0.25-0.35
-        dte_min/dte_max: Near-term expiry window (default weekly range)
-        limit: Max candidates
-        require_liquidity: Require positive bid+ask
+        delta_min/delta_max: Target delta range (typical 0.25-0.35)
+        dte_min/dte_max: Target days to expiration (DTE) range
+        limit: Max candidates to return
     """
     return WheelService.select_put_for_wheel(
         symbol=symbol, market=market, delta_min=delta_min, delta_max=delta_max,
         dte_min=dte_min, dte_max=dte_max, limit=limit, require_liquidity=require_liquidity
     )
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_wheel_put_return(symbol: str, strike: float, expiry: str, premium: float) -> Dict[str, Any]:
+    """
+    Calculate the annualized return (%) for a specific Wheel put option.
+    
+    Parameters:
+        symbol: Underlying ticker
+        strike: Option strike price
+        expiry: Expiration date (YYYY-MM-DD)
+        premium: Premium received (e.g., 2.50)
+    """
+    return WheelService.get_wheel_put_return(symbol, strike, expiry, premium)
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_wheel_put_breakeven(symbol: str, strike: float, premium: float) -> Dict[str, Any]:
+    """
+    Calculate the break-even price and downside buffer for a specific put.
+    """
+    return WheelService.get_wheel_put_breakeven(symbol, strike, premium)
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_wheel_put_assignment_probability(symbol: str, strike: float, expiry: str) -> Dict[str, Any]:
+    """
+    Get the approximate probability of assignment (being 'put' the stock) for a strike.
+    Uses Delta as a proxy for probability of expiring in-the-money.
+    """
+    return WheelService.get_wheel_put_assignment_probability(symbol, strike, expiry)
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_wheel_event_risk(symbol: str, market: str = "sweden", days: int = 14) -> Dict[str, Any]:
+    """
+    Analyze event-related risks (earnings, CPI, interest rates) for a Wheel position.
+    """
+    return EventService.get_wheel_event_risk_window(ticker=symbol, market=market, days_ahead=days)
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_wheel_capital_required(symbol: str, strike: float, contracts: int = 1, margin_pct: float = 1.0) -> Dict[str, Any]:
+    """
+    Calculate the total capital required to collateralize a cash-secured put.
+    
+    Parameters:
+        symbol: Underlying ticker
+        strike: Option strike price
+        contracts: Number of contracts (default 1)
+        margin_pct: Margin requirement (1.0 for 100% cash-secured, lower for portfolio margin)
+    """
+    return WheelService.get_wheel_capital_required(symbol, strike, contracts, margin_pct)
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_wheel_call_candidates(symbol: str, cost_basis: float) -> Dict[str, Any]:
+    """Find Covered Call candidates after being assigned stock."""
+    return await WheelService.get_wheel_call_candidates(symbol, cost_basis)
+
+
+@mcp.tool()
+@tool_endpoint()
+async def get_wheel_call_return(symbol: str, strike: float, expiry: str, premium: float, cost_basis: float) -> Dict[str, Any]:
+    """Calculate total return for a covered call plan."""
+    return WheelService.get_wheel_call_return(symbol, strike, expiry, premium, cost_basis)
+
+
+@mcp.tool()
+@tool_endpoint()
+async def analyze_wheel_put_risk(symbol: str, strike: float, premium: float, drop_pct: float = 5.0) -> Dict[str, Any]:
+    """
+    Analyze risk and loss scenarios if the stock price drops by a certain percentage.
+    """
+    return WheelService.analyze_put_risk(symbol, pct_below_spot=drop_pct, target_dte=7)
 
 
 @mcp.tool()
@@ -2198,3 +2327,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

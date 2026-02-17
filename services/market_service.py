@@ -317,3 +317,22 @@ class MarketService:
             }
         finally:
             session.close()
+    @staticmethod
+    async def get_stock_quote(symbol: str) -> Dict[str, Any]:
+        """
+        Get full quote details including bid/ask, change, and turnover.
+        """
+        res = await MarketService.get_price(symbol)
+        if not res.get("success"):
+            return res
+        
+        # In this system, get_price already returns bid/ask/change if available
+        return res
+
+    @staticmethod
+    async def get_historical_prices(symbol: str, period: str = '1m', interval: str = '1d'):
+        """
+        Unified historical data retrieval.
+        """
+        from services.market_intelligence_service import MarketIntelligenceService
+        return MarketIntelligenceService.get_historical_data_cached(symbol, period, interval)

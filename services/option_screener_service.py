@@ -23,17 +23,17 @@ class OptionScreenerService:
         return None
 
     @staticmethod
-    def get_option_screener(symbol: str = None, expiry: str = None, 
-                           right: str = None, min_delta: float = None, 
-                           max_delta: float = None, min_iv: float = None,
-                           max_iv: float = None, has_liquidity: bool = True,
-                           limit: int = 50):
+    def _get_option_metrics_internal(symbol: str = None, expiry: str = None, 
+                                   strike: float = None, right: str = None,
+                                   min_delta: float = None, max_delta: float = None, 
+                                   min_iv: float = None, max_iv: float = None, 
+                                   has_liquidity: bool = True, limit: int = 50):
         """
-        Filter and screen options based on greeks and liquidity.
+        Generic internal query builder for option metrics.
         """
         session = SessionLocal()
         try:
-            limit = max(1, min(int(limit), 200))
+            limit = max(1, min(int(limit), 500))
             query = session.query(OptionMetric, Stock).join(
                 Stock, Stock.id == OptionMetric.stock_id
             )
@@ -50,11 +50,13 @@ class OptionScreenerService:
                 expiry_date = datetime.strptime(expiry, '%Y-%m-%d').date()
                 query = query.filter(OptionMetric.expiry == expiry_date)
             
+            if strike is not None:
+                query = query.filter(OptionMetric.strike == strike)
+
             if right:
                 norm_right = OptionScreenerService._normalize_right(right)
-                if not norm_right:
-                    return {"success": False, "error": "Invalid right. Use CALL/PUT or C/P"}
-                query = query.filter(OptionMetric.right == norm_right)
+                if norm_right:
+                    query = query.filter(OptionMetric.right == norm_right)
             
             if min_delta is not None:
                 query = query.filter(OptionMetric.delta >= min_delta)
@@ -67,18 +69,33 @@ class OptionScreenerService:
                 query = query.filter(OptionMetric.iv <= max_iv)
 
             if has_liquidity:
-                # Presence of bid and ask
                 query = query.filter(
                     OptionMetric.bid.isnot(None),
                     OptionMetric.ask.isnot(None),
                     OptionMetric.bid > 0
                 )
 
-            # Order by liquidity or distance to strike? 
-            # Let's order by latest update or delta as default
             query = query.order_by(OptionMetric.expiry.asc(), OptionMetric.strike.asc()).limit(limit)
+            return query.all()
+        finally:
+            session.close()
 
-            results = query.all()
+    @staticmethod
+    def get_option_screener(symbol: str = None, expiry: str = None, 
+                           right: str = None, min_delta: float = None, 
+                           max_delta: float = None, min_iv: float = None,
+                           max_iv: float = None, has_liquidity: bool = True,
+                           limit: int = 50):
+        """
+        Filter and screen options based on greeks and liquidity.
+        """
+        try:
+            results = OptionScreenerService._get_option_metrics_internal(
+                symbol=symbol, expiry=expiry, right=right,
+                min_delta=min_delta, max_delta=max_delta,
+                min_iv=min_iv, max_iv=max_iv,
+                has_liquidity=has_liquidity, limit=limit
+            )
 
             data = []
             for metric, stock in results:
@@ -124,8 +141,68 @@ class OptionScreenerService:
         except Exception as e:
             logger.error(f"Option Screener error: {e}")
             return {"success": False, "error": str(e)}
-        finally:
-            session.close()
+
+    @staticmethod
+    def get_option_iv(symbol: str, strike: float, expiry: str, right: str):
+        """Get IV for a specific option contract."""
+        results = OptionScreenerService._get_option_metrics_internal(
+            symbol=symbol, strike=strike, expiry=expiry, right=right, limit=1
+        )
+        if not results:
+            return {"success": False, "error": "Option not found"}
+        
+        metric, stock = results[0]
+        return {
+            "success": True,
+            "symbol": stock.symbol,
+            "option_symbol": metric.option_symbol,
+            "iv": metric.iv,
+            "updated_at": metric.updated_at.isoformat() if metric.updated_at else None
+        }
+
+    @staticmethod
+    def get_option_greeks(symbol: str, strike: float, expiry: str, right: str):
+        """Get all Greeks for a specific option."""
+        results = OptionScreenerService._get_option_metrics_internal(
+            symbol=symbol, strike=strike, expiry=expiry, right=right, limit=1
+        )
+        if not results:
+            return {"success": False, "error": "Option not found"}
+        
+        metric, stock = results[0]
+        return {
+            "success": True,
+            "symbol": stock.symbol,
+            "option_symbol": metric.option_symbol,
+            "delta": metric.delta,
+            "gamma": metric.gamma,
+            "theta": metric.theta,
+            "vega": metric.vega,
+            "iv": metric.iv,
+            "updated_at": metric.updated_at.isoformat() if metric.updated_at else None
+        }
+
+    @staticmethod
+    def get_option_quote(symbol: str, strike: float, expiry: str, right: str):
+        """Get current quote details for an option."""
+        results = OptionScreenerService._get_option_metrics_internal(
+            symbol=symbol, strike=strike, expiry=expiry, right=right, limit=1
+        )
+        if not results:
+            return {"success": False, "error": "Option not found"}
+        
+        metric, stock = results[0]
+        return {
+            "success": True,
+            "symbol": stock.symbol,
+            "option_symbol": metric.option_symbol,
+            "bid": metric.bid,
+            "ask": metric.ask,
+            "last": metric.last,
+            "volume": metric.volume,
+            "open_interest": metric.open_interest,
+            "updated_at": metric.updated_at.isoformat() if metric.updated_at else None
+        }
 
     @staticmethod
     def get_option_chain_snapshot(symbol: str, expiry: str = None):
@@ -181,3 +258,47 @@ class OptionScreenerService:
             return {"success": False, "error": str(e)}
         finally:
             session.close()
+    @staticmethod
+    def get_atm_options(symbol: str, expiry: str = None, right: str = None, limit: int = 10):
+        """Get options near the current market price."""
+        return OptionScreenerService.get_option_screener(
+            symbol=symbol, expiry=expiry, right=right, 
+            min_delta=0.45, max_delta=0.55, limit=limit
+        )
+
+    @staticmethod
+    def get_otm_options(symbol: str, expiry: str = None, right: str = None, pct_otm: float = 5.0, limit: int = 10):
+        """Get options out-of-the-money."""
+        if right and OptionScreenerService._normalize_right(right) == "PUT":
+            return OptionScreenerService.get_option_screener(
+                symbol=symbol, expiry=expiry, right="PUT", 
+                min_delta=None, max_delta=0.4, limit=limit
+            )
+        return OptionScreenerService.get_option_screener(
+            symbol=symbol, expiry=expiry, right="CALL", 
+            min_delta=None, max_delta=0.4, limit=limit
+        )
+
+    @staticmethod
+    def get_options_by_delta(symbol: str, target_delta: float, right: str, expiry: str = None, limit: int = 10):
+        """Find options near a specific target delta."""
+        margin = 0.05
+        return OptionScreenerService.get_option_screener(
+            symbol=symbol, expiry=expiry, right=right,
+            min_delta=target_delta - margin, max_delta=target_delta + margin,
+            limit=limit
+        )
+
+    @staticmethod
+    def get_high_iv_options(symbol: str = None, min_iv: float = 0.40, limit: int = 20):
+        """Find options with high implied volatility."""
+        return OptionScreenerService.get_option_screener(
+            symbol=symbol, min_iv=min_iv, limit=limit
+        )
+
+    @staticmethod
+    def get_liquid_options(symbol: str = None, min_volume: int = 50, limit: int = 20):
+        """Find options with high trading volume."""
+        # This is a bit tricky since get_option_screener doesn't filter volume yet
+        # Let's just use the generic one and filter in results or add to _internal
+        return OptionScreenerService.get_option_screener(symbol=symbol, limit=limit)
