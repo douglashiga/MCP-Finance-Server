@@ -1,0 +1,63 @@
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0* Host api.nasdaq.com:443 was resolved.
+* IPv6: (none)
+* IPv4: 23.210.235.78
+*   Trying 23.210.235.78:443...
+* Connected to api.nasdaq.com (23.210.235.78) port 443
+* ALPN: curl offers h2,http/1.1
+* (304) (OUT), TLS handshake, Client hello (1):
+} [319 bytes data]
+*  CAfile: /etc/ssl/cert.pem
+*  CApath: none
+* (304) (IN), TLS handshake, Server hello (2):
+{ [122 bytes data]
+* (304) (IN), TLS handshake, Unknown (8):
+{ [29 bytes data]
+* (304) (IN), TLS handshake, Certificate (11):
+{ [3449 bytes data]
+* (304) (IN), TLS handshake, CERT verify (15):
+{ [264 bytes data]
+* (304) (IN), TLS handshake, Finished (20):
+{ [36 bytes data]
+* (304) (OUT), TLS handshake, Finished (20):
+} [36 bytes data]
+* SSL connection using TLSv1.3 / AEAD-CHACHA20-POLY1305-SHA256 / [blank] / UNDEF
+* ALPN: server accepted h2
+* Server certificate:
+*  subject: C=US; ST=New York; L=New York; O=NASDAQ, INC.; CN=www.nasdaq.com
+*  start date: Dec 11 00:00:00 2025 GMT
+*  expire date: Apr 14 23:59:59 2026 GMT
+*  subjectAltName: host "api.nasdaq.com" matched cert's "api.nasdaq.com"
+*  issuer: C=US; O=DigiCert Inc; CN=DigiCert TLS RSA SHA256 2020 CA1
+*  SSL certificate verify ok.
+* using HTTP/2
+* [HTTP/2] [1] OPENED stream for https://api.nasdaq.com/api/search/stocks?q=ABB&limit=5
+* [HTTP/2] [1] [:method: GET]
+* [HTTP/2] [1] [:scheme: https]
+* [HTTP/2] [1] [:authority: api.nasdaq.com]
+* [HTTP/2] [1] [:path: /api/search/stocks?q=ABB&limit=5]
+* [HTTP/2] [1] [accept: */*]
+* [HTTP/2] [1] [user-agent: Mozilla/5.0]
+> GET /api/search/stocks?q=ABB&limit=5 HTTP/2
+> Host: api.nasdaq.com
+> Accept: */*
+> User-Agent: Mozilla/5.0
+> 
+* Request completely sent off
+  0     0    0     0    0     0      0      0 --:--:--  0:00:01 --:--:--     0< HTTP/2 404 
+< server: Kestrel
+< lang: en
+< srctype: default
+< rid: 99d983e6-5b50-46d5-b971-ec74c371c119
+< gid: 104
+< content-length: 0
+< x-edgeconnect-midmile-rtt: 82
+< x-edgeconnect-origin-mex-latency: 48
+< date: Mon, 16 Feb 2026 21:37:12 GMT
+< set-cookie: akaalb_ALB_Default=~op=ao_api__east1:ao_api_central1|~rv=17~m=ao_api_central1:0|~os=ff51b6e767de05e2054c5c99e232919a~id=24821fae9978af0a673f1f50dbcdc249; path=/; HttpOnly; Secure; SameSite=None
+< strict-transport-security: max-age=86400
+< 
+{ [0 bytes data]
+  0     0    0     0    0     0      0      0 --:--:--  0:00:01 --:--:--     0
+* Connection #0 to host api.nasdaq.com left intact
