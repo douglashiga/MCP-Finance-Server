@@ -1084,6 +1084,57 @@ app.mount("/assets", StaticFiles(directory=os.path.join(STATIC_DIR, "assets")), 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
+
+@app.get("/api/options/avanza/expirations")
+def get_avanza_expirations(symbol: str = Query(...)):
+    """Get available expiration dates for a symbol from local DB (Avanza data)."""
+    session = SessionLocal()
+    try:
+        stock = session.query(Stock).filter(Stock.symbol.ilike(f"%{symbol}%")).first()
+        if not stock:
+            raise HTTPException(404, f"Stock {symbol} not found")
+        
+        # Get unique expiries
+        expiries = session.query(OptionMetric.expiry).filter(
+            OptionMetric.stock_id == stock.id
+        ).distinct().order_by(OptionMetric.expiry.asc()).all()
+        
+        return {"success": True, "expirations": [str(e[0]) for e in expiries]}
+    finally:
+        session.close()
+
+@app.get("/api/options/avanza/chain")
+def get_avanza_chain(symbol: str = Query(...), expiry: str = Query(None)):
+    """Get Avanza-style option chain (grouped by strike)."""
+    result = OptionScreenerService.get_option_chain_snapshot(symbol, expiry)
+    if not result.get("success"):
+        raise HTTPException(404, result.get("error", "Option chain not found"))
+    
+    # Group by strike for the Avanza layout (CALL | Strike | PUT)
+    data = result["data"]
+    grouped = {}
+    for row in data:
+        strike = row["strike"]
+        if strike not in grouped:
+            grouped[strike] = {"strike": strike, "call": None, "put": None}
+        
+        if row["right"] == "CALL":
+            grouped[strike]["call"] = row
+        else:
+            grouped[strike]["put"] = row
+            
+    # Convert to sorted list
+    rows = sorted(grouped.values(), key=lambda x: x["strike"])
+    
+    return {
+        "success": True,
+        "symbol": result["symbol"],
+        "expiry": expiry,
+        "rows": rows,
+        "as_of": result.get("as_of_datetime")
+    }
+
+
 @app.get("/{full_path:path}")
 async def serve_ui(full_path: str):
     """Serve the React UI or fallback to index.html for SPA routing."""

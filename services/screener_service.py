@@ -13,8 +13,10 @@ logger = logging.getLogger(__name__)
 MARKET_MAP = {
     "brazil": ["B3"],
     "b3": ["B3"],
+    "br": ["B3"],        # ISO country code alias
     "sweden": ["OMX"],
     "omx": ["OMX"],
+    "se": ["OMX"],       # ISO country code alias
     "usa": ["NASDAQ", "NYSE"],
     "us": ["NASDAQ", "NYSE"],
     "nasdaq": ["NASDAQ"],
@@ -30,10 +32,37 @@ DEFAULT_MARKET = "sweden"
 DEFAULT_PERIOD = "1D"
 DEFAULT_SIGNAL = "oversold"
 
+# Valid periods stored in the MarketMover table
+VALID_PERIODS = ["1D", "1W", "1M"]
+
+# Map orchestrator period codes (uppercased) to the nearest valid DB period.
+# The orchestrator sends "1d", "5d", "1mo", "3mo", "1y"; after .upper() they
+# become "1D", "5D", "1MO", "3MO", "1Y".  Only "1D" matches natively.
+PERIOD_FALLBACK_MAP = {
+    "5D":  ("1W",  "Período '5D' não disponível; mostrando '1W' (semana, mais próximo)"),
+    "1MO": ("1M",  "Período '1 mês' não disponível; mostrando '1M' (mês)"),
+    "3MO": ("1M",  "Período '3 meses' não disponível; mostrando '1M' (mês, mais próximo)"),
+    "1Y":  ("1M",  "Período '1 ano' não disponível; mostrando '1M' (mês, mais próximo)"),
+}
+
 
 def _resolve_market(market: str) -> list:
     """Resolve market name to list of exchange codes."""
     return MARKET_MAP.get((market or DEFAULT_MARKET).lower(), [market.upper()])
+
+
+def _resolve_period(period: str) -> tuple[str, str | None]:
+    """Resolve period to a valid DB value.
+
+    Returns (resolved_period, note) where note is non-None when a fallback was applied.
+    """
+    p = (period or DEFAULT_PERIOD).upper()
+    if p in VALID_PERIODS:
+        return p, None
+    fallback = PERIOD_FALLBACK_MAP.get(p)
+    if fallback:
+        return fallback[0], fallback[1]
+    return DEFAULT_PERIOD, f"Período '{period}' inválido; usando '{DEFAULT_PERIOD}' (padrão)"
 
 
 def _normalize_limit(limit: int, default: int = DEFAULT_LIMIT) -> int:
@@ -161,7 +190,7 @@ class ScreenerService:
             market = market or DEFAULT_MARKET
             exchanges = _resolve_market(market)
             limit = _normalize_limit(limit)
-            period = (period or DEFAULT_PERIOD).upper()
+            period, period_note = _resolve_period(period)
             category = category or "top_gainers"
 
             results = session.query(MarketMover, Stock).join(
@@ -199,6 +228,7 @@ class ScreenerService:
                 "as_of_datetime": latest_calculated.isoformat() if latest_calculated else None,
                 "criteria": {"market": market, "period": period, "category": category, "limit": limit},
                 "empty_reason": None if data else "no_market_mover_data_for_criteria",
+                "period_note": period_note,
                 "defaults": {"period": DEFAULT_PERIOD, "limit": DEFAULT_LIMIT},
             }
 
