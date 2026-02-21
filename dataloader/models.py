@@ -126,6 +126,10 @@ class Stock(Base):
     industry = Column(String(100))
     currency = Column(String(10), default="USD")
     country = Column(String(50))
+    is_active = Column(Boolean, default=True, nullable=False)
+    track_prices = Column(Boolean, default=True, nullable=False)
+    track_options = Column(Boolean, default=False, nullable=False)
+    track_fundamentals = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -870,6 +874,7 @@ class Job(Base):
 
     runs = relationship("JobRun", back_populates="job", cascade="all, delete-orphan",
                         order_by="JobRun.started_at.desc()")
+    quality_logs = relationship("DataQualityLog", back_populates="job", cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<Job {self.name} ({self.category})>"
@@ -896,4 +901,30 @@ class JobRun(Base):
     __table_args__ = (
         Index("ix_job_runs_job_status", "job_id", "status"),
         Index("ix_job_runs_started", "started_at"),
+    )
+
+
+class DataQualityLog(Base):
+    """Log for specific data quality issues found during job execution."""
+    __tablename__ = "data_quality_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_id = Column(Integer, ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False)
+    stock_id = Column(Integer, ForeignKey("stocks.id", ondelete="CASCADE"), nullable=True)
+    run_id = Column(Integer, ForeignKey("job_runs.id", ondelete="CASCADE"), nullable=True)
+    
+    issue_type = Column(String(50), nullable=False)          # missing_data, invalid_value, api_error, ticker_not_found
+    severity = Column(String(20), default="warning")        # info, warning, error, critical
+    description = Column(Text, nullable=False)
+    payload = Column(Text)                                  # JSON or raw error data
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    job = relationship("Job", back_populates="quality_logs")
+    stock = relationship("Stock")
+
+    __table_args__ = (
+        Index("ix_dq_logs_job", "job_id"),
+        Index("ix_dq_logs_stock", "stock_id"),
+        Index("ix_dq_logs_type", "issue_type"),
+        Index("ix_dq_logs_created", "created_at"),
     )

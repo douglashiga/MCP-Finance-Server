@@ -1,6 +1,6 @@
 """
 Job scheduler — runs data loader Python scripts on cron schedules.
-Uses APScheduler with a SQLite job store for persistence.
+Uses APScheduler with the PostgreSQL database for job persistence.
 """
 import asyncio
 import logging

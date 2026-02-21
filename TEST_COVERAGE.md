@@ -73,7 +73,7 @@ Os métodos que agora consultam o banco local (arquitetura ELT):
 ## ✨ Próximos Passos
 
 Para testes de integração completos com a arquitetura ELT:
-1. Criar testes que validam dados reais do banco SQLite
+1. Criar testes que validam dados reais do banco PostgreSQL
 2. Testar os extractors e transformers individualmente
 3. Criar testes end-to-end do pipeline completo
 

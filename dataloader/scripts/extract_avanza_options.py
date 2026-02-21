@@ -14,7 +14,8 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 sys.path.insert(0, PROJECT_ROOT)
 
 from dataloader.database import SessionLocal
-from dataloader.models import Stock, OptionContract, OptionMetric
+from dataloader.models import Stock, OptionContract, OptionMetric, Job
+from services.data_quality_service import DataQualityService
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(name)s:%(message)s')
 logger = logging.getLogger("extract_avanza_options")
@@ -146,13 +147,24 @@ def fetch_option_details(orderbook_ids: List[int]) -> List[Dict[str, Any]]:
             
     return results
 
-async def process_stock_options(session, stock, test=False):
+def get_job_id(session):
+    job = session.query(Job).filter_by(name='Extract Avanza Options').first()
+    return job.id if job else None
+
+async def process_stock_options(session, stock, job_id, run_id=None):
     # 1. Get Avanza ID
     search_term = stock.symbol.split(".")[0]
     avanza_underlying_id = get_avanza_id(search_term)
     
     if not avanza_underlying_id:
-        logger.warning(f"Could not find Avanza ID for {stock.symbol}")
+        DataQualityService.log_issue(
+            job_id=job_id,
+            run_id=run_id,
+            stock_id=stock.id,
+            issue_type="missing_provider_id",
+            severity="warning",
+            description=f"Could not find Avanza ID for ticker {stock.symbol}"
+        )
         return 0
         
     logger.info(f"Found Avanza ID {avanza_underlying_id} for {stock.symbol}. Fetching matrix...")
@@ -160,7 +172,14 @@ async def process_stock_options(session, stock, test=False):
     # 2. Get Matrix (discover IDs)
     option_ids = fetch_option_matrix(avanza_underlying_id)
     if not option_ids:
-        logger.info(f"No options found for {stock.symbol}")
+        DataQualityService.log_issue(
+            job_id=job_id,
+            run_id=run_id,
+            stock_id=stock.id,
+            issue_type="no_options_found",
+            severity="info",
+            description=f"No options found in Avanza matrix for {stock.symbol}"
+        )
         return 0
     
     logger.info(f"Found {len(option_ids)} options for {stock.symbol}. Fetching details...")
@@ -178,6 +197,15 @@ async def process_stock_options(session, stock, test=False):
             right = "CALL" if "CALL" in opt.get("instrumentType", "") else "PUT"
             
             if not name or not strike or not expiry_str:
+                DataQualityService.log_issue(
+                    job_id=job_id,
+                    run_id=run_id,
+                    stock_id=stock.id,
+                    issue_type="invalid_option_metadata",
+                    severity="warning",
+                    description=f"Option {orderbook_id} missing critical metadata (name/strike/expiry)",
+                    payload=opt
+                )
                 continue
                 
             expiry = datetime.strptime(expiry_str, "%Y-%m-%d").date()
@@ -205,6 +233,20 @@ async def process_stock_options(session, stock, test=False):
             
             # 2. Upsert OptionMetric
             quote = opt.get("quote", {})
+            bid = _to_float(quote.get("buy"))
+            ask = _to_float(quote.get("sell"))
+            
+            if bid is None or ask is None:
+                DataQualityService.log_issue(
+                    job_id=job_id,
+                    run_id=run_id,
+                    stock_id=stock.id,
+                    issue_type="missing_quotes",
+                    severity="info",
+                    description=f"Option {name} missing bid/ask",
+                    payload={"orderbook_id": orderbook_id, "quote": quote}
+                )
+
             advanced = opt.get("advancedOptionData", {}) or {}
             greeks = advanced.get("greeks", {}) or {}
             
@@ -215,8 +257,8 @@ async def process_stock_options(session, stock, test=False):
                 "strike": strike,
                 "right": right,
                 "expiry": expiry,
-                "bid": _to_float(quote.get("buy")),
-                "ask": _to_float(quote.get("sell")),
+                "bid": bid,
+                "ask": ask,
                 "last": _to_float(quote.get("last")),
                 "volume": _to_int(quote.get("totalVolumeTraded")),
                 "delta": _to_float(greeks.get("delta")),
@@ -249,12 +291,21 @@ async def process_stock_options(session, stock, test=False):
 async def main(market="OMX", test=False, symbol=None):
     session = SessionLocal()
     total_count = 0
+    run_id = os.environ.get("RUN_ID")
+    if run_id: run_id = int(run_id)
+    
     try:
-        # Get stocks for the market
+        job_id = get_job_id(session)
+        
+        # Get stocks for the market using master data flags
+        query = session.query(Stock).filter(Stock.is_active == True)
+        
         if symbol:
-            stocks = session.query(Stock).filter(Stock.symbol.ilike(f"%{symbol}%")).all()
+            query = query.filter(Stock.symbol.ilike(f"%{symbol}%"))
         else:
-            stocks = session.query(Stock).filter_by(exchange=market).all()
+            query = query.filter(Stock.exchange == market, Stock.track_options == True)
+            
+        stocks = query.all()
             
         if test:
             stocks = stocks[:1]
@@ -262,7 +313,7 @@ async def main(market="OMX", test=False, symbol=None):
         logger.info(f"Processing {len(stocks)} stocks for {market} on Avanza...")
         
         for stock in stocks:
-            total_count += await process_stock_options(session, stock, test)
+            total_count += await process_stock_options(session, stock, job_id, run_id)
         
         return total_count
             

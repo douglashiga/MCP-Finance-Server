@@ -16,6 +16,7 @@ import DataBrowser from './pages/DataBrowser'
 import Queue from './pages/Queue'
 import LLMSettings from './pages/LLMSettings'
 import OptionChain from './pages/OptionChain'
+import DataQuality from './pages/DataQuality'
 
 const EMPTY_STATS = {
     jobs: { active: 0, total: 0 },
@@ -91,6 +92,7 @@ const App = () => {
         { id: 'schema', label: 'Schema', icon: Database },
         { id: 'data', label: 'Data Browser', icon: Terminal },
         { id: 'options', label: 'Option Chain', icon: PlusCircle },
+        { id: 'quality', label: 'Data Quality', icon: AlertCircle },
         { id: 'settings', label: 'Settings', icon: Settings },
     ]
 
@@ -144,6 +146,7 @@ const App = () => {
                     {activeTab === 'schema' && <Schema />}
                     {activeTab === 'data' && <DataBrowser />}
                     {activeTab === 'options' && <OptionChain />}
+                    {activeTab === 'quality' && <DataQuality />}
                     {activeTab === 'settings' && <LLMSettings />}
                 </div>
             </main>

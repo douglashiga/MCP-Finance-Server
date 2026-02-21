@@ -1135,6 +1135,33 @@ def get_avanza_chain(symbol: str = Query(...), expiry: str = Query(None)):
     }
 
 
+from services.data_quality_service import DataQualityService
+
+@app.get("/api/data-quality/recent")
+def get_recent_dq_logs(limit: int = 50):
+    """Get the most recent data quality issues from all jobs."""
+    return DataQualityService.get_recent_issues(limit=limit)
+
+@app.patch("/api/stocks/{stock_id}/flags")
+def update_stock_flags(stock_id: int, data: Dict[str, Any], _auth: None = Depends(require_admin_api_key)):
+    """Update master data flags (track_prices, track_options, etc) for a stock."""
+    session = SessionLocal()
+    try:
+        stock = session.query(Stock).filter(Stock.id == stock_id).first()
+        if not stock:
+            raise HTTPException(404, "Stock not found")
+        
+        allowed_flags = ["is_active", "track_prices", "track_options", "track_fundamentals"]
+        for flag in allowed_flags:
+            if flag in data:
+                setattr(stock, flag, data[flag])
+        
+        stock.updated_at = datetime.utcnow()
+        session.commit()
+        return {"status": "updated", "id": stock_id}
+    finally:
+        session.close()
+
 @app.get("/{full_path:path}")
 async def serve_ui(full_path: str):
     """Serve the React UI or fallback to index.html for SPA routing."""

@@ -8,40 +8,22 @@ from sqlalchemy.orm import sessionmaker, Session
 from typing import Generator
 
 # Database configuration
-# Set DATABASE_URL environment variable to use PostgreSQL:
-# export DATABASE_URL="postgresql://user:password@localhost:5432/finance_db"
-# Otherwise defaults to SQLite
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    f"sqlite:///{os.path.join(os.path.dirname(__file__), 'finance_data.db')}"
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+if not DATABASE_URL or not DATABASE_URL.startswith("postgresql"):
+    raise RuntimeError(
+        "DATABASE_URL environment variable must be set and start with 'postgresql'. "
+        "SQLite is no longer supported. Please check your .env or docker-compose.yml."
+    )
+
+# Create engine for PostgreSQL
+engine = create_engine(
+    DATABASE_URL,
+    pool_size=10,
+    max_overflow=20,
+    pool_pre_ping=True,  # Verify connections before using
+    echo=False
 )
-
-# Create engine with appropriate settings
-if DATABASE_URL.startswith("postgresql"):
-    # PostgreSQL settings
-    engine = create_engine(
-        DATABASE_URL,
-        pool_size=10,
-        max_overflow=20,
-        pool_pre_ping=True,  # Verify connections before using
-        echo=False
-    )
-else:
-    # SQLite settings
-    engine = create_engine(
-        DATABASE_URL,
-        connect_args={"check_same_thread": False},
-        echo=False
-    )
-
-# Enable WAL mode and foreign keys for SQLite only
-if not DATABASE_URL.startswith("postgresql"):
-    @event.listens_for(engine, "connect")
-    def _set_sqlite_pragma(dbapi_conn, connection_record):
-        cursor = dbapi_conn.cursor()
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 

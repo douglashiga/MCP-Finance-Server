@@ -38,7 +38,7 @@ graph TB
         end
         
         subgraph "Data Layer"
-            DB[(PostgreSQL/SQLite<br/>finance_data.db)]
+            DB[(PostgreSQL Database)]
             CACHE[Local Cache<br/>Curated Tables]
         end
         

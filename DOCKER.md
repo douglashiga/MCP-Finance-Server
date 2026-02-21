@@ -65,7 +65,7 @@ docker compose up -d postgres dataloader
 ### 2. **mcp-finance** (Porta 8000)
 - MCP Server principal
 - Conecta ao IB Gateway
-- Consulta banco local SQLite
+- Consulta banco de dados PostgreSQL
 
 ### 3. **dataloader** (Porta 8001)
 - Scheduler + API + UI
@@ -106,18 +106,6 @@ Use `IB_ENABLED=false` para manter o MCP ativo sem tentar conectar no IB:
 
 ```bash
 IB_ENABLED=false docker compose up -d mcp-finance postgres dataloader
-```
-
-### Persistir banco de dados
-
-Adicione um volume para o SQLite:
-
-```yaml
-dataloader:
-  volumes:
-    - ./dataloader:/app/dataloader
-    - ./logs:/app/logs
-    - ./data:/app/data  # <-- Adicionar
 ```
 
 ---
