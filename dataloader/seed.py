@@ -263,6 +263,14 @@ DEFAULT_JOBS = [
         "cron_expression": "0 */4 * * *",  # Every 4 hours
         "timeout_seconds": 600,
     },
+    {
+        "name": "Maintenance Cleanup",
+        "description": "Deactivates dead instruments and purges old data quality logs",
+        "script_path": "maintenance_cleanup.py --days 3",
+        "cron_expression": "0 1 * * *",  # Daily at 1 AM
+        "timeout_seconds": 600,
+        "affected_tables": "data_quality_logs,stocks,option_metrics",
+    },
 ]
 
 
@@ -304,6 +312,9 @@ FIRST_LOAD_STEPS = [
     {"phase": "COMPUTE", "name": "Extract Avanza Options", "command": "extract_avanza_options.py --market OMX", "timeout": 1200},
     {"phase": "COMPUTE", "name": "Extract Nasdaq Options - OMX", "command": "extract_nasdaq_options.py", "timeout": 1200},
     {"phase": "COMPUTE", "name": "Load Market Intelligence", "command": "load_market_intelligence.py --news-limit 25", "timeout": 2400},
+    
+    # ===== MAINTENANCE =====
+    {"phase": "MAINTENANCE", "name": "Maintenance Cleanup", "command": "maintenance_cleanup.py --days 0", "timeout": 600},
 ]
 
 

@@ -682,7 +682,7 @@ class OptionContract(Base):
 
     __table_args__ = (
         UniqueConstraint("provider", "con_id", name="uq_option_contract_provider_id"),
-        UniqueConstraint("local_symbol", "exchange", name="uq_option_contract_symbol_exchange"),
+        UniqueConstraint("provider", "local_symbol", "exchange", name="uq_option_contract_symbol_exchange"),
         Index("ix_option_contracts_stock_expiry", "stock_id", "expiry"),
     )
 

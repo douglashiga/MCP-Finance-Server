@@ -34,6 +34,7 @@ def main():
     
     session = SessionLocal()
     count = 0
+    logged_nan = set()
     run_id = os.environ.get("RUN_ID")
     if run_id: run_id = int(run_id)
     
@@ -101,15 +102,18 @@ def main():
                         price = float(last_row['Close'])
                         
                         if pd.isna(price):
-                            DataQualityService.log_issue(
-                                job_id=job_id,
-                                run_id=run_id,
-                                stock_id=stock.id,
-                                issue_type="invalid_value",
-                                severity="warning",
-                                description=f"NaN price for {sym}",
-                                payload=last_row.to_dict()
-                            )
+                            # Only log NaN once per run per symbol to avoid flooding
+                            if sym not in logged_nan:
+                                DataQualityService.log_issue(
+                                    job_id=job_id,
+                                    run_id=run_id,
+                                    stock_id=stock.id,
+                                    issue_type="invalid_value",
+                                    severity="warning",
+                                    description=f"NaN price for {sym}",
+                                    payload=last_row.to_dict()
+                                )
+                                logged_nan.add(sym)
                             continue
                             
                         price_data = {

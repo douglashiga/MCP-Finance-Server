@@ -4,7 +4,7 @@ import os
 import json
 import logging
 import asyncio
-import requests
+import httpx
 import time
 from datetime import datetime, date
 from typing import List, Dict, Any, Optional
@@ -17,6 +17,7 @@ from dataloader.database import SessionLocal
 from dataloader.models import Stock, OptionContract, OptionMetric, Job
 from services.data_quality_service import DataQualityService
 
+# Configure logging to be simpler for job logs
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(name)s:%(message)s')
 logger = logging.getLogger("extract_avanza_options")
 
@@ -24,7 +25,9 @@ AVANZA_API_BASE = "https://www.avanza.se/_api"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "application/json",
-    "Content-Type": "application/json"
+    "Content-Type": "application/json",
+    "Origin": "https://www.avanza.se",
+    "Referer": "https://www.avanza.se/borshandlade-produkter/optioner-terminer/lista.html"
 }
 
 def _to_float(val):
@@ -43,13 +46,13 @@ def _to_int(val):
         return int(val)
     except: return None
 
-def fetch_with_retry(url, method="GET", payload=None, params=None, retries=3, backoff=2):
+async def fetch_with_retry_async(client, url, method="GET", payload=None, params=None, retries=3, backoff=1):
     for i in range(retries):
         try:
             if method == "POST":
-                resp = requests.post(url, json=payload, headers=HEADERS, timeout=20)
+                resp = await client.post(url, json=payload, params=params, timeout=20.0)
             else:
-                resp = requests.get(url, params=params, headers=HEADERS, timeout=20)
+                resp = await client.get(url, params=params, timeout=20.0)
             
             if resp.status_code == 200:
                 return resp.json()
@@ -62,10 +65,10 @@ def fetch_with_retry(url, method="GET", payload=None, params=None, retries=3, ba
             logger.warning(f"Attempt {i+1} failed for {url}: {e}")
         
         if i < retries - 1:
-            time.sleep(backoff * (i + 1))
+            await asyncio.sleep(backoff * (i + 1))
     return None
 
-def get_avanza_id(query: str) -> Optional[str]:
+async def get_avanza_id(client: httpx.AsyncClient, query: str) -> Optional[str]:
     """Search for the Avanza orderbookId for an underlying symbol."""
     try:
         url = f"{AVANZA_API_BASE}/search/filtered-search"
@@ -76,93 +79,87 @@ def get_avanza_id(query: str) -> Optional[str]:
             "screenSize": "DESKTOP",
             "pagination": {"from": 0, "size": 10}
         }
-        data = fetch_with_retry(url, method="POST", payload=payload)
+        data = await fetch_with_retry_async(client, url, method="POST", payload=payload)
         if data:
-            logger.info(f"Avanza search for '{clean_query}' returned {len(data.get('hits', []))} hits")
             for hit in data.get("hits", []):
                 # Prefer exact ticker match or title match
                 hit_title = hit.get("title", "").upper()
                 if clean_query in hit_title:
-                    logger.info(f"Selected Hit: {hit.get('title')} | ID: {hit.get('orderBookId')}")
                     return hit.get("orderBookId")
             
             if data.get("hits"):
-                first_hit = data["hits"][0]
-                return first_hit.get("orderBookId")
+                return data["hits"][0].get("orderBookId")
         return None
     except Exception as e:
         logger.error(f"Error searching Avanza ID for {query}: {e}")
         return None
 
-def fetch_option_matrix(underlying_id: str) -> List[int]:
+async def fetch_option_matrix(client: httpx.AsyncClient, underlying_id: str) -> List[int]:
     """Fetch the option chain matrix orderbook IDs."""
     url = f"{AVANZA_API_BASE}/market-option-future-forward-list/matrix"
-    # Try multiple payload variations based on debug findings
-    payloads = [
-        {"underlyingId": underlying_id},
-        {"underlyingOrderbookId": int(underlying_id)},
-        {"underlyingOrderbookId": int(underlying_id), "instrumentType": "OPTION_STOCK"}
-    ]
     
-    for payload in payloads:
-        data = fetch_with_retry(url, method="POST", payload=payload, retries=1)
-        if data:
-            # The matrix can have 'matrix' key or be the root
-            matrix_data = data.get("matrix", {}) if isinstance(data, dict) else {}
-            rows = matrix_data.get("rows", [])
-            if not rows and isinstance(data, list):
-                rows = data
-            
-            ids = []
-            for row in rows:
-                for col in ["call", "put"]:
-                    opt = row.get(col)
-                    if opt and opt.get("orderbookId"):
-                        ids.append(int(opt["orderbookId"]))
-            if ids:
-                return ids
+    payload = {
+        "filter": {
+            "underlyingInstruments": [str(underlying_id)],
+            "optionTypes": [],
+            "endDates": [],
+            "callIndicators": []
+        },
+        "offset": 0,
+        "limit": 500,  # Increased limit
+        "sortBy": {
+            "field": "strikePrice",
+            "order": "desc"
+        }
+    }
+    
+    data = await fetch_with_retry_async(client, url, method="POST", payload=payload)
+    if data:
+        ids = []
+        matched = data.get("matchedOptions", [])
+        for row in matched:
+            for col in ["call", "put"]:
+                opt = row.get(col)
+                if opt and opt.get("orderbookId"):
+                    ids.append(int(opt["orderbookId"]))
+        return ids
     return []
 
-def fetch_option_details(orderbook_ids: List[int]) -> List[Dict[str, Any]]:
-    """Fetch detailed metrics (Greeks, etc.) for a list of option IDs."""
+async def fetch_single_option(client: httpx.AsyncClient, oid: int, sem: asyncio.Semaphore) -> Optional[Dict[str, Any]]:
+    async with sem:
+        url = f"{AVANZA_API_BASE}/market-guide/option/{oid}"
+        try:
+            resp = await client.get(url, timeout=15.0)
+            if resp.status_code == 200:
+                return resp.json()
+            return None
+        except Exception as e:
+            logger.debug(f"Error fetching option {oid}: {e}")
+            return None
+
+async def fetch_option_details(client: httpx.AsyncClient, orderbook_ids: List[int]) -> List[Dict[str, Any]]:
+    """Fetch detailed metrics (Greeks, etc.) for a list of option IDs in parallel."""
     if not orderbook_ids:
         return []
     
-    results = []
-    chunk_size = 50
-    for i in range(0, len(orderbook_ids), chunk_size):
-        chunk = orderbook_ids[i:i+chunk_size]
-        ids_str = ",".join(map(str, chunk))
-        # Try different formats for listing details
-        url = f"{AVANZA_API_BASE}/market-guide/option/list?orderbookIds={ids_str}"
-        data = fetch_with_retry(url, method="GET")
-        if data:
-            results.extend(data)
-        else:
-            # Try POST if GET fails
-            url_post = f"{AVANZA_API_BASE}/market-guide/option/list"
-            data_post = fetch_with_retry(url_post, method="POST", payload=chunk)
-            if data_post:
-                results.extend(data_post)
-            
-    return results
+    sem = asyncio.Semaphore(10) # 10 concurrent requests max
+    tasks = [fetch_single_option(client, oid, sem) for oid in orderbook_ids]
+    results = await asyncio.gather(*tasks)
+    return [r for r in results if r]
 
 def get_job_id(session):
     job = session.query(Job).filter_by(name='Extract Avanza Options').first()
     return job.id if job else None
 
-async def process_stock_options(session, stock, job_id, run_id=None):
+async def process_stock_options(client, session, stock, job_id, run_id=None):
     # 1. Get Avanza ID
     search_term = stock.symbol.split(".")[0]
-    avanza_underlying_id = get_avanza_id(search_term)
+    avanza_underlying_id = await get_avanza_id(client, search_term)
     
     if not avanza_underlying_id:
         DataQualityService.log_issue(
-            job_id=job_id,
-            run_id=run_id,
-            stock_id=stock.id,
-            issue_type="missing_provider_id",
-            severity="warning",
+            job_id=job_id, run_id=run_id, stock_id=stock.id,
+            issue_type="missing_provider_id", severity="warning",
             description=f"Could not find Avanza ID for ticker {stock.symbol}"
         )
         return 0
@@ -170,42 +167,37 @@ async def process_stock_options(session, stock, job_id, run_id=None):
     logger.info(f"Found Avanza ID {avanza_underlying_id} for {stock.symbol}. Fetching matrix...")
     
     # 2. Get Matrix (discover IDs)
-    option_ids = fetch_option_matrix(avanza_underlying_id)
+    option_ids = await fetch_option_matrix(client, avanza_underlying_id)
     if not option_ids:
         DataQualityService.log_issue(
-            job_id=job_id,
-            run_id=run_id,
-            stock_id=stock.id,
-            issue_type="no_options_found",
-            severity="info",
+            job_id=job_id, run_id=run_id, stock_id=stock.id,
+            issue_type="no_options_found", severity="info",
             description=f"No options found in Avanza matrix for {stock.symbol}"
         )
         return 0
     
-    logger.info(f"Found {len(option_ids)} options for {stock.symbol}. Fetching details...")
+    logger.info(f"Found {len(option_ids)} options for {stock.symbol}. Fetching detailed prices...")
     
-    # 3. Get Details (Greeks, bid/ask)
-    details = fetch_option_details(option_ids)
+    # 3. Get Details (singular parallel calls)
+    details = await fetch_option_details(client, option_ids)
     
     count = 0
     for opt in details:
         try:
             name = opt.get("name")
             orderbook_id = int(opt["orderbookId"])
-            strike = _to_float(opt.get("strikePrice"))
-            expiry_str = opt.get("expirationDate")
-            right = "CALL" if "CALL" in opt.get("instrumentType", "") else "PUT"
+            
+            # Key indicators structure in singular response
+            ki = opt.get("keyIndicators", {})
+            strike = _to_float(ki.get("strikePrice"))
+            expiry_str = ki.get("endDate")
+            
+            # Avanza singular response doesn't always have instrumentType in root, 
+            # check name or callIndicator
+            call_ind = ki.get("callIndicator", "").upper()
+            right = "CALL" if "KÖP" in call_ind or "CALL" in call_ind else "PUT"
             
             if not name or not strike or not expiry_str:
-                DataQualityService.log_issue(
-                    job_id=job_id,
-                    run_id=run_id,
-                    stock_id=stock.id,
-                    issue_type="invalid_option_metadata",
-                    severity="warning",
-                    description=f"Option {orderbook_id} missing critical metadata (name/strike/expiry)",
-                    payload=opt
-                )
                 continue
                 
             expiry = datetime.strptime(expiry_str, "%Y-%m-%d").date()
@@ -217,36 +209,19 @@ async def process_stock_options(session, stock, job_id, run_id=None):
             
             if not contract:
                 contract = OptionContract(
-                    stock_id=stock.id,
-                    provider="AVANZA",
-                    con_id=orderbook_id,
-                    symbol=stock.symbol,
-                    local_symbol=name,
-                    strike=strike,
-                    right=right,
-                    expiry=expiry,
-                    exchange=stock.exchange,
-                    currency="SEK"
+                    stock_id=stock.id, provider="AVANZA", con_id=orderbook_id,
+                    symbol=stock.symbol, local_symbol=name, strike=strike,
+                    right=right, expiry=expiry, exchange=stock.exchange, currency="SEK"
                 )
                 session.add(contract)
-                session.flush() # get ID
+                session.flush()
             
             # 2. Upsert OptionMetric
             quote = opt.get("quote", {})
-            bid = _to_float(quote.get("buy"))
-            ask = _to_float(quote.get("sell"))
+            bid = _to_float(quote.get("buy") or quote.get("bid"))
+            ask = _to_float(quote.get("sell") or quote.get("ask"))
             
-            if bid is None or ask is None:
-                DataQualityService.log_issue(
-                    job_id=job_id,
-                    run_id=run_id,
-                    stock_id=stock.id,
-                    issue_type="missing_quotes",
-                    severity="info",
-                    description=f"Option {name} missing bid/ask",
-                    payload={"orderbook_id": orderbook_id, "quote": quote}
-                )
-
+            # Advanced data (Greeks) might be null or in advancedOptionData
             advanced = opt.get("advancedOptionData", {}) or {}
             greeks = advanced.get("greeks", {}) or {}
             
@@ -269,19 +244,15 @@ async def process_stock_options(session, stock, job_id, run_id=None):
                 "updated_at": datetime.utcnow()
             }
             
-            existing = session.query(OptionMetric).filter_by(
-                option_contract_id=contract.id
-            ).first()
-            
+            existing = session.query(OptionMetric).filter_by(option_contract_id=contract.id).first()
             if existing:
-                for k, v in m.items():
-                    setattr(existing, k, v)
+                for k, v in m.items(): setattr(existing, k, v)
             else:
                 session.add(OptionMetric(**m))
             
             count += 1
         except Exception as e:
-            logger.error(f"Error processing option {opt.get('name')}: {e}")
+            logger.error(f"Error processing option {opt.get('orderbookId')}: {e}")
             continue
             
     session.commit()
@@ -296,8 +267,6 @@ async def main(market="OMX", test=False, symbol=None):
     
     try:
         job_id = get_job_id(session)
-        
-        # Get stocks for the market using master data flags
         query = session.query(Stock).filter(Stock.is_active == True)
         
         if symbol:
@@ -306,17 +275,15 @@ async def main(market="OMX", test=False, symbol=None):
             query = query.filter(Stock.exchange == market, Stock.track_options == True)
             
         stocks = query.all()
-            
-        if test:
-            stocks = stocks[:1]
+        if test: stocks = stocks[:1]
         
         logger.info(f"Processing {len(stocks)} stocks for {market} on Avanza...")
         
-        for stock in stocks:
-            total_count += await process_stock_options(session, stock, job_id, run_id)
+        async with httpx.AsyncClient(headers=HEADERS, timeout=30.0) as client:
+            for stock in stocks:
+                total_count += await process_stock_options(client, session, stock, job_id, run_id)
         
         return total_count
-            
     finally:
         session.close()
 

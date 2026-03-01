@@ -1,75 +1,89 @@
 import React, { useState, useEffect } from 'react';
-import { Search, Calendar, RefreshCw, ChevronRight, Info } from 'lucide-react';
+import { Search, Calendar, RefreshCw, ChevronRight, Info, Filter } from 'lucide-react';
 
 const OptionChain = () => {
-    const [symbol, setSymbol] = useState('NDA-SE.ST');
-    const [searchInput, setSearchInput] = useState('NDA-SE.ST');
-    const [expirations, setExpirations] = useState([]);
-    const [selectedExpiry, setSelectedExpiry] = useState('');
-    const [chain, setChain] = useState([]);
+    const [selectedSymbols, setSelectedSymbols] = useState(['NDA-SE.ST', 'TELIA.ST']);
+    const [selectedRights, setSelectedRights] = useState(['CALL', 'PUT']);
+    const [availableExpiries, setAvailableExpiries] = useState([]);
+    const [selectedExpiries, setSelectedExpiries] = useState([]);
+    const [options, setOptions] = useState([]);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
 
-    const fetchExpirations = async (sym) => {
-        try {
-            const res = await fetch(`/api/options/avanza/expirations?symbol=${sym}`);
-            const data = await res.json();
-            if (data.success && data.expirations.length > 0) {
-                setExpirations(data.expirations);
-                setSelectedExpiry(data.expirations[0]);
-                return data.expirations[0];
-            }
-            return null;
-        } catch (err) {
-            console.error('Failed to fetch expirations', err);
-            return null;
-        }
-    };
-
-    const fetchChain = async (sym, exp) => {
-        setLoading(true);
-        setError(null);
-        try {
-            const res = await fetch(`/api/options/avanza/chain?symbol=${sym}&expiry=${exp}`);
-            const data = await res.json();
-            if (data.success) {
-                setChain(data.rows);
-            } else {
-                setError(data.error || 'Failed to fetch option chain');
-            }
-        } catch (err) {
-            setError('Network error or server unavailable');
-        } finally {
-            setLoading(false);
-        }
-    };
-
+    // Fetch expirations when symbols change
     useEffect(() => {
-        const init = async () => {
-            const firstExp = await fetchExpirations(symbol);
-            if (firstExp) {
-                fetchChain(symbol, firstExp);
+        const fetchExpirations = async () => {
+            if (selectedSymbols.length === 0) {
+                setAvailableExpiries([]);
+                setSelectedExpiries([]);
+                return;
+            }
+            try {
+                const symStr = selectedSymbols.join(',');
+                const res = await fetch(`/api/options/avanza/list/expirations?symbols=${symStr}`);
+                const data = await res.json();
+                if (data.success) {
+                    setAvailableExpiries(data.expirations);
+                    // Keep previously selected if still available
+                    const newSelected = selectedExpiries.filter(e => data.expirations.includes(e));
+                    // If none selected but we have options, maybe select the first 4 dates
+                    if (newSelected.length === 0 && data.expirations.length > 0) {
+                        newSelected.push(...data.expirations.slice(0, 4));
+                    }
+                    setSelectedExpiries(newSelected);
+                }
+            } catch (err) {
+                console.error('Failed to fetch expirations', err);
             }
         };
-        init();
-    }, []);
+        fetchExpirations();
+    }, [selectedSymbols]); // Only refetch when symbols change
 
-    const handleSearch = async (e) => {
-        e.preventDefault();
-        const firstExp = await fetchExpirations(searchInput);
-        if (firstExp) {
-            setSymbol(searchInput);
-            fetchChain(searchInput, firstExp);
-        } else {
-            setError(`No options found for ${searchInput}`);
-            setExpirations([]);
-            setChain([]);
-        }
+    // Fetch options when filters change
+    useEffect(() => {
+        const fetchOptions = async () => {
+            if (selectedSymbols.length === 0 || selectedRights.length === 0 || selectedExpiries.length === 0) {
+                setOptions([]);
+                return;
+            }
+            setLoading(true);
+            setError(null);
+            try {
+                const symStr = selectedSymbols.join(',');
+                const rightStr = selectedRights.join(',');
+                const expStr = selectedExpiries.join(',');
+                const res = await fetch(`/api/options/avanza/list?symbols=${symStr}&rights=${rightStr}&expiries=${expStr}`);
+                const data = await res.json();
+                if (data.success) {
+                    setOptions(data.data);
+                } else {
+                    setError('Failed to fetch option list');
+                }
+            } catch (err) {
+                setError('Network error or server unavailable');
+            } finally {
+                setLoading(false);
+            }
+        };
+        fetchOptions();
+    }, [selectedSymbols, selectedRights, selectedExpiries]);
+
+    const toggleSymbol = (sym) => {
+        setSelectedSymbols(prev =>
+            prev.includes(sym) ? prev.filter(s => s !== sym) : [...prev, sym]
+        );
     };
 
-    const handleExpiryChange = (exp) => {
-        setSelectedExpiry(exp);
-        fetchChain(symbol, exp);
+    const toggleRight = (right) => {
+        setSelectedRights(prev =>
+            prev.includes(right) ? prev.filter(r => r !== right) : [...prev, right]
+        );
+    };
+
+    const toggleExpiry = (exp) => {
+        setSelectedExpiries(prev =>
+            prev.includes(exp) ? prev.filter(e => e !== exp) : [...prev, exp]
+        );
     };
 
     const formatVal = (val, fixed = 2) => {
@@ -82,56 +96,64 @@ const OptionChain = () => {
             padding: '24px',
             color: '#e2e8f0',
             fontFamily: 'Inter, system-ui, sans-serif',
-        },
-        header: {
             display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            marginBottom: '32px',
+            gap: '24px',
+            maxWidth: '1200px',
+            margin: '0 auto'
         },
-        searchBox: {
-            display: 'flex',
+        sidebar: {
+            width: '280px',
+            flexShrink: 0,
             background: '#1e293b',
-            padding: '8px 16px',
-            borderRadius: '12px',
+            borderRadius: '16px',
+            padding: '24px',
             border: '1px solid #334155',
-            alignItems: 'center',
-            width: '300px',
+            height: 'fit-content'
         },
-        searchInput: {
-            background: 'none',
-            border: 'none',
-            color: 'white',
-            marginLeft: '8px',
-            outline: 'none',
-            width: '100%',
-            fontSize: '14px',
-        },
-        expiryTabs: {
+        main: {
+            flex: 1,
             display: 'flex',
-            gap: '8px',
-            marginBottom: '24px',
-            overflowX: 'auto',
-            paddingBottom: '8px',
+            flexDirection: 'column',
+            gap: '24px'
         },
-        tab: (active) => ({
-            padding: '8px 16px',
-            borderRadius: '8px',
-            background: active ? '#059b72' : '#1e293b',
-            border: '1px solid',
-            borderColor: active ? '#059b72' : '#334155',
-            color: 'white',
+        filterSection: {
+            marginBottom: '24px'
+        },
+        filterTitle: {
+            fontSize: '14px',
+            fontWeight: '600',
+            color: '#94a3b8',
+            marginBottom: '12px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            textTransform: 'uppercase',
+            letterSpacing: '0.05em'
+        },
+        checkboxLabel: {
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            fontSize: '14px',
+            marginBottom: '8px',
             cursor: 'pointer',
-            fontSize: '13px',
-            fontWeight: active ? '600' : '400',
-            whiteSpace: 'nowrap',
-            transition: 'all 0.2s',
-        }),
+            color: '#cbd5e1',
+            transition: 'color 0.2s',
+            fontWeight: '500'
+        },
+        checkbox: {
+            width: '18px',
+            height: '18px',
+            cursor: 'pointer',
+            accentColor: '#059b72',
+            borderRadius: '4px'
+        },
         tableContainer: {
             background: '#1e293b',
             borderRadius: '16px',
             border: '1px solid #334155',
             overflow: 'hidden',
+            boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1)'
         },
         table: {
             width: '100%',
@@ -143,159 +165,248 @@ const OptionChain = () => {
             borderBottom: '1px solid #334155',
         },
         th: {
-            padding: '12px 16px',
+            padding: '16px',
+            color: '#94a3b8',
+            textAlign: 'left',
+            fontWeight: '600',
+            textTransform: 'uppercase',
+            letterSpacing: '0.05em',
+            fontSize: '12px',
+        },
+        thRight: {
+            padding: '16px',
             color: '#94a3b8',
             textAlign: 'right',
             fontWeight: '600',
             textTransform: 'uppercase',
             letterSpacing: '0.05em',
-            fontSize: '11px',
-        },
-        strikeTh: {
-            background: '#1e293b',
-            textAlign: 'center',
-            color: 'white',
-            width: '80px',
-            borderLeft: '1px solid #334155',
-            borderRight: '1px solid #334155',
+            fontSize: '12px',
         },
         tr: {
             borderBottom: '1px solid #334155',
-            transition: 'background 0.2s',
+            transition: 'all 0.2s ease',
+            cursor: 'pointer'
         },
         td: {
             padding: '12px 16px',
+            textAlign: 'left',
+            color: '#f1f5f9'
+        },
+        tdRight: {
+            padding: '12px 16px',
             textAlign: 'right',
+            color: '#f1f5f9',
+            fontVariantNumeric: 'tabular-nums'
         },
-        strikeTd: {
-            background: '#0f172a',
-            textAlign: 'center',
-            fontWeight: 'bold',
+        callBadge: {
+            background: 'rgba(5, 155, 114, 0.15)',
+            border: '1px solid rgba(5, 155, 114, 0.3)',
             color: '#10b981',
-            borderLeft: '1px solid #334155',
-            borderRight: '1px solid #334155',
+            padding: '3px 10px',
+            borderRadius: '6px',
+            fontSize: '11px',
+            fontWeight: '700',
+            letterSpacing: '0.02em'
         },
-        symbolLabel: {
-            fontSize: '10px',
-            color: '#64748b',
-            display: 'block',
-            fontFamily: 'monospace',
+        putBadge: {
+            background: 'rgba(239, 68, 68, 0.15)',
+            border: '1px solid rgba(239, 68, 68, 0.3)',
+            color: '#ef4444',
+            padding: '3px 10px',
+            borderRadius: '6px',
+            fontSize: '11px',
+            fontWeight: '700',
+            letterSpacing: '0.02em'
         },
-        deltaLabel: {
+        optionName: {
             color: '#38bdf8',
+            fontWeight: '600',
+            textDecoration: 'none',
+            fontSize: '14px'
         },
-        ivLabel: {
-            color: '#a855f7',
+        dateLabel: {
+            color: '#94a3b8',
+            fontSize: '12px'
         }
     };
 
     return (
         <div style={styles.container}>
-            <div style={styles.header}>
-                <div>
-                    <h1 style={{ fontSize: '24px', fontWeight: 'bold', marginBottom: '8px' }}>
-                        Option Chain <span style={{ color: '#059b72' }}>Avanza Format</span>
+            {/* Sidebar Filters */}
+            <div style={styles.sidebar}>
+                <div style={{ marginBottom: '32px' }}>
+                    <h2 style={{ fontSize: '18px', fontWeight: 'bold', color: 'white', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <Filter size={18} color="#059b72" /> Filters
+                    </h2>
+                </div>
+
+                <div style={styles.filterSection}>
+                    <div style={styles.filterTitle}>Underlying Asset</div>
+                    {['NDA-SE.ST', 'TELIA.ST'].map(sym => (
+                        <label key={sym} style={styles.checkboxLabel} className="hover:text-white group">
+                            <input
+                                type="checkbox"
+                                style={styles.checkbox}
+                                checked={selectedSymbols.includes(sym)}
+                                onChange={() => toggleSymbol(sym)}
+                            />
+                            {sym.split('.')[0]}
+                        </label>
+                    ))}
+                </div>
+
+                <div style={styles.filterSection}>
+                    <div style={styles.filterTitle}>Option Type</div>
+                    <label style={styles.checkboxLabel} className="hover:text-white">
+                        <input
+                            type="checkbox"
+                            style={styles.checkbox}
+                            checked={selectedRights.includes('CALL')}
+                            onChange={() => toggleRight('CALL')}
+                        />
+                        Call options
+                    </label>
+                    <label style={styles.checkboxLabel} className="hover:text-white">
+                        <input
+                            type="checkbox"
+                            style={styles.checkbox}
+                            checked={selectedRights.includes('PUT')}
+                            onChange={() => toggleRight('PUT')}
+                        />
+                        Put options
+                    </label>
+                </div>
+
+                <div style={styles.filterSection}>
+                    <div style={styles.filterTitle}>
+                        <Calendar size={14} /> Expiration Date
+                    </div>
+                    {availableExpiries.length === 0 ? (
+                        <div style={{ fontSize: '13px', color: '#64748b', fontStyle: 'italic' }}>No expirations available</div>
+                    ) : (
+                        <div style={{ maxHeight: '300px', overflowY: 'auto', paddingRight: '8px' }}>
+                            {availableExpiries.map(exp => (
+                                <label key={exp} style={styles.checkboxLabel} className="hover:text-white">
+                                    <input
+                                        type="checkbox"
+                                        style={styles.checkbox}
+                                        checked={selectedExpiries.includes(exp)}
+                                        onChange={() => toggleExpiry(exp)}
+                                    />
+                                    {exp}
+                                </label>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            </div>
+
+            {/* Main Content Area */}
+            <div style={styles.main}>
+                <div style={{ paddingBottom: '12px', borderBottom: '1px solid #334155' }}>
+                    <h1 style={{ fontSize: '28px', fontWeight: '800', marginBottom: '8px', letterSpacing: '-0.02em' }}>
+                        Option List <span style={{ color: '#059b72', fontWeight: '400' }}>Sweden</span>
                     </h1>
-                    <p style={{ color: '#94a3b8', fontSize: '14px' }}>
-                        Market: Sweden (OMX) | Symbol: {symbol}
+                    <p style={{ color: '#94a3b8', fontSize: '15px' }}>
+                        Showing options for selected underlying assets, expiration dates, and types.
                     </p>
                 </div>
-                <form onSubmit={handleSearch} style={styles.searchBox}>
-                    <Search size={18} color="#64748b" />
-                    <input
-                        style={styles.searchInput}
-                        placeholder="Search stock (e.g. NDA-SE.ST)"
-                        value={searchInput}
-                        onChange={(e) => setSearchInput(e.target.value)}
-                    />
-                </form>
-            </div>
 
-            {error && (
-                <div style={{ background: '#450a0a', border: '1px solid #991b1b', padding: '12px', borderRadius: '8px', marginBottom: '24px', color: '#fca5a5', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <Info size={18} /> {error}
-                </div>
-            )}
-
-            <div style={styles.expiryTabs}>
-                {expirations.map(exp => (
-                    <button
-                        key={exp}
-                        onClick={() => handleExpiryChange(exp)}
-                        style={styles.tab(selectedExpiry === exp)}
-                    >
-                        {exp}
-                    </button>
-                ))}
-            </div>
-
-            <div style={styles.tableContainer}>
-                {loading ? (
-                    <div style={{ padding: '60px', textAlign: 'center', color: '#64748b' }}>
-                        <RefreshCw size={32} className="animate-spin" style={{ margin: '0 auto 16px' }} />
-                        <p>Loading chain data...</p>
+                {error && (
+                    <div style={{ background: '#450a0a', border: '1px solid #991b1b', padding: '16px', borderRadius: '12px', color: '#fca5a5', display: 'flex', alignItems: 'center', gap: '12px' }}>
+                        <Info size={20} /> {error}
                     </div>
-                ) : (
+                )}
+
+                <div style={styles.tableContainer}>
                     <table style={styles.table}>
                         <thead style={styles.thead}>
                             <tr>
-                                <th colSpan="5" style={{ textAlign: 'center', borderBottom: '2px solid #059b72', color: '#059b72' }}>CALLS</th>
-                                <th style={styles.strikeTh}>STRIKE</th>
-                                <th colSpan="5" style={{ textAlign: 'center', borderBottom: '2px solid #ef4444', color: '#ef4444' }}>PUTS</th>
-                            </tr>
-                            <tr>
-                                <th style={styles.th}>Bid</th>
-                                <th style={styles.th}>Ask</th>
-                                <th style={styles.th}>IV</th>
-                                <th style={styles.th}>Delta</th>
-                                <th style={styles.th}>Symbol</th>
-                                <th style={styles.strikeTh}></th>
-                                <th style={{ ...styles.th, textAlign: 'left' }}>Symbol</th>
-                                <th style={{ ...styles.th, textAlign: 'left' }}>Delta</th>
-                                <th style={{ ...styles.th, textAlign: 'left' }}>IV</th>
-                                <th style={{ ...styles.th, textAlign: 'left' }}>Bid</th>
-                                <th style={{ ...styles.th, textAlign: 'left' }}>Ask</th>
+                                <th style={styles.th}>Option</th>
+                                <th style={styles.th}>Type</th>
+                                <th style={styles.thRight}>Strike</th>
+                                <th style={styles.thRight}>Bid (Ctr)</th>
+                                <th style={styles.thRight}>Ask (Ctr)</th>
+                                <th style={styles.thRight}>Latest</th>
+                                <th style={styles.thRight}>IV %</th>
+                                <th style={styles.thRight}>Theta</th>
+                                <th style={styles.thRight}>Delta</th>
+                                <th style={styles.thRight}>Volume</th>
+                                <th style={styles.thRight}>Expiry</th>
                             </tr>
                         </thead>
                         <tbody>
-                            {chain.map((row) => (
-                                <tr key={row.strike} style={styles.tr}>
-                                    {/* CALLS */}
-                                    <td style={styles.td}>{formatVal(row.call?.bid)}</td>
-                                    <td style={styles.td}>{formatVal(row.call?.ask)}</td>
-                                    <td style={{ ...styles.td, ...styles.ivLabel }}>{formatVal(row.call?.iv ? row.call.iv * 100 : null, 1)}%</td>
-                                    <td style={{ ...styles.td, ...styles.deltaLabel }}>{formatVal(row.call?.delta)}</td>
-                                    <td style={styles.td}>
-                                        {row.call ? (
-                                            <span style={styles.symbolLabel}>{row.call.option_symbol}</span>
-                                        ) : '—'}
-                                    </td>
-
-                                    {/* STRIKE */}
-                                    <td style={styles.strikeTd}>{row.strike}</td>
-
-                                    {/* PUTS */}
-                                    <td style={{ ...styles.td, textAlign: 'left' }}>
-                                        {row.put ? (
-                                            <span style={styles.symbolLabel}>{row.put.option_symbol}</span>
-                                        ) : '—'}
-                                    </td>
-                                    <td style={{ ...styles.td, ...styles.deltaLabel, textAlign: 'left' }}>{formatVal(row.put?.delta)}</td>
-                                    <td style={{ ...styles.td, ...styles.ivLabel, textAlign: 'left' }}>{formatVal(row.put?.iv ? row.put.iv * 100 : null, 1)}%</td>
-                                    <td style={{ ...styles.td, textAlign: 'left' }}>{formatVal(row.put?.bid)}</td>
-                                    <td style={{ ...styles.td, textAlign: 'left' }}>{formatVal(row.put?.ask)}</td>
-                                </tr>
-                            ))}
-                            {chain.length === 0 && !loading && (
+                            {loading ? (
                                 <tr>
-                                    <td colSpan="11" style={{ padding: '40px', textAlign: 'center', color: '#64748b' }}>
-                                        No data available for this expiry. Run the ingestion job to populate the database.
+                                    <td colSpan="8" style={{ padding: '80px', textAlign: 'center', color: '#64748b' }}>
+                                        <RefreshCw size={32} className="animate-spin" style={{ margin: '0 auto 16px', color: '#059b72' }} />
+                                        <p style={{ fontSize: '15px' }}>Loading options data...</p>
                                     </td>
                                 </tr>
+                            ) : options.length === 0 ? (
+                                <tr>
+                                    <td colSpan="8" style={{ padding: '80px', textAlign: 'center', color: '#64748b' }}>
+                                        <div style={{ background: '#0f172a', display: 'inline-block', padding: '16px 24px', borderRadius: '12px', border: '1px solid #334155' }}>
+                                            <p style={{ fontSize: '15px', fontWeight: '500', color: '#e2e8f0' }}>No options found</p>
+                                            <p style={{ fontSize: '13px', marginTop: '4px' }}>Try selecting different filters or expirations.</p>
+                                        </div>
+                                    </td>
+                                </tr>
+                            ) : (
+                                options.map((opt, i) => (
+                                    <tr
+                                        key={opt.option_symbol + '_' + i}
+                                        style={styles.tr}
+                                        onMouseEnter={(e) => e.currentTarget.style.background = '#334155'}
+                                        onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+                                    >
+                                        <td style={styles.td}>
+                                            <span style={styles.optionName}>{opt.option_symbol}</span>
+                                        </td>
+                                        <td style={styles.td}>
+                                            {opt.right === 'CALL' ? (
+                                                <span style={styles.callBadge}>CALL</span>
+                                            ) : (
+                                                <span style={styles.putBadge}>PUT</span>
+                                            )}
+                                        </td>
+                                        <td style={styles.tdRight}>
+                                            <strong style={{ color: 'white', fontSize: '14px' }}>{formatVal(opt.strike)}</strong>
+                                        </td>
+                                        <td style={styles.tdRight}>{formatVal(opt.bid)}</td>
+                                        <td style={styles.tdRight}>{formatVal(opt.ask)}</td>
+                                        <td style={styles.tdRight}>
+                                            <span style={{ color: '#e2e8f0', fontWeight: '500' }}>{formatVal(opt.last)}</span>
+                                        </td>
+                                        <td style={{ ...styles.tdRight, color: '#a78bfa' }}>
+                                            {opt.iv != null ? (opt.iv * 100).toFixed(1) + '%' : '—'}
+                                            {opt.iv != null && (
+                                                <span style={{ fontSize: '9px', opacity: 0.6, marginLeft: '4px' }}>
+                                                    {opt.greeks_source === 'IBKR' ? 'IB' : 'AV'}
+                                                </span>
+                                            )}
+                                        </td>
+                                        <td style={{ ...styles.tdRight, color: '#f97316' }}>
+                                            {formatVal(opt.theta, 4)}
+                                        </td>
+                                        <td style={{ ...styles.tdRight, color: '#38bdf8' }}>
+                                            {formatVal(opt.delta, 3)}
+                                        </td>
+                                        <td style={styles.tdRight}>{opt.volume || '—'}</td>
+                                        <td style={{ ...styles.tdRight, ...styles.dateLabel }}>
+                                            {opt.expiry}
+                                        </td>
+                                    </tr>
+                                ))
                             )}
                         </tbody>
                     </table>
-                )}
+                </div>
+                <div style={{ padding: '8px 16px', fontSize: '11px', color: '#64748b', display: 'flex', gap: '16px', justifyContent: 'flex-end' }}>
+                    <span><strong style={{ color: '#059b72' }}>Prices:</strong> Always Avanza</span>
+                    <span><strong style={{ color: '#94a3b8' }}>Greeks (IB):</strong> Fallback from Interactive Brokers</span>
+                    <span><strong style={{ color: '#94a3b8' }}>Greeks (AV):</strong> Direct from Avanza</span>
+                </div>
             </div>
         </div>
     );

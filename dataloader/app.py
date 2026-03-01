@@ -10,7 +10,7 @@ import csv
 import io
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Any
+from typing import Optional, Any, Dict
 import asyncio
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Depends, Header
@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from dataloader.database import SessionLocal, init_db, engine
-from dataloader.models import Job, JobRun, LLMConfig
+from dataloader.models import Job, JobRun, LLMConfig, OptionMetric, Stock, OptionContract
 from dataloader.scheduler import scheduler, SCRIPTS_DIR
 from services.option_screener_service import OptionScreenerService
 
@@ -1133,6 +1133,125 @@ def get_avanza_chain(symbol: str = Query(...), expiry: str = Query(None)):
         "rows": rows,
         "as_of": result.get("as_of_datetime")
     }
+
+
+@app.get("/api/options/avanza/list/expirations")
+def get_avanza_list_expirations(symbols: str = Query("")):
+    """Get available expiration dates for multiple symbols (comma-separated) — only AVANZA data."""
+    session = SessionLocal()
+    try:
+        symbol_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+        if not symbol_list:
+            return {"success": True, "expirations": []}
+
+        expiries = session.query(OptionMetric.expiry).join(
+            Stock, Stock.id == OptionMetric.stock_id
+        ).join(
+            OptionContract, OptionContract.id == OptionMetric.option_contract_id
+        ).filter(
+            Stock.symbol.in_(symbol_list),
+            OptionContract.provider == "AVANZA"
+        ).distinct().order_by(OptionMetric.expiry.asc()).all()
+
+        return {"success": True, "expirations": [str(e[0]) for e in expiries]}
+    finally:
+        session.close()
+
+
+@app.get("/api/options/avanza/list")
+def get_avanza_list(
+    symbols: str = Query(""),
+    rights: str = Query(""),
+    expiries: str = Query(""),
+):
+    """Get Avanza-style option list with prices from Avanza and Greeks from IBKR as fallback."""
+    session = SessionLocal()
+    try:
+        query = session.query(OptionMetric, Stock).join(
+            Stock, Stock.id == OptionMetric.stock_id
+        ).join(
+            OptionContract, OptionContract.id == OptionMetric.option_contract_id
+        ).filter(
+            OptionContract.provider == "AVANZA"
+        )
+
+        symbol_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+        if symbol_list:
+            query = query.filter(Stock.symbol.in_(symbol_list))
+
+        right_list = [r.strip().upper() for r in rights.split(",") if r.strip().upper() in ["CALL", "PUT"]]
+        if right_list:
+            query = query.filter(OptionMetric.right.in_(right_list))
+
+        expiry_list = []
+        for e in expiries.split(","):
+            e = e.strip()
+            if e:
+                try:
+                    expiry_list.append(datetime.strptime(e, '%Y-%m-%d').date())
+                except ValueError:
+                    pass
+        if expiry_list:
+            query = query.filter(OptionMetric.expiry.in_(expiry_list))
+
+        results = query.order_by(
+            OptionMetric.expiry.asc(), 
+            OptionMetric.strike.asc(), 
+            OptionMetric.right.asc()
+        ).all()
+
+        # Build a lookup from IBKR Greeks: key = (stock_id, strike, right, expiry)
+        ibkr_lookup = {}
+        if results:
+            stock_ids = list({stock.id for _, stock in results})
+            ibkr_results = session.query(OptionMetric).join(
+                OptionContract, OptionContract.id == OptionMetric.option_contract_id
+            ).filter(
+                OptionMetric.stock_id.in_(stock_ids),
+                OptionContract.provider != "AVANZA",
+                OptionMetric.iv != None
+            ).all()
+            for m in ibkr_results:
+                key = (m.stock_id, m.strike, m.right, m.expiry)
+                # Keep the most recent entry per key
+                if key not in ibkr_lookup or (m.updated_at and ibkr_lookup[key].updated_at and m.updated_at > ibkr_lookup[key].updated_at):
+                    ibkr_lookup[key] = m
+
+        data = []
+        for metric, stock in results:
+            # Fallback Greeks from IBKR if Avanza values are null
+            key = (stock.id, metric.strike, metric.right, metric.expiry)
+            ibkr = ibkr_lookup.get(key)
+
+            iv    = metric.iv    if metric.iv    is not None else (ibkr.iv    if ibkr else None)
+            theta = metric.theta if metric.theta is not None else (ibkr.theta if ibkr else None)
+            delta = metric.delta if metric.delta is not None else (ibkr.delta if ibkr else None)
+
+            data.append({
+                "symbol": stock.symbol,
+                "option_symbol": metric.option_symbol,
+                "strike": metric.strike,
+                "right": metric.right,
+                "expiry": str(metric.expiry),
+                "bid": metric.bid,
+                "ask": metric.ask,
+                "last": metric.last,
+                "volume": metric.volume,
+                "open_interest": metric.open_interest,
+                "iv": iv,
+                "theta": theta,
+                "delta": delta,
+                "greeks_source": "IBKR" if (ibkr and (metric.iv is None)) else "AVANZA",
+                "updated_at": metric.updated_at.isoformat() if metric.updated_at else None
+            })
+
+        return {
+            "success": True,
+            "data": data,
+            "count": len(data)
+        }
+    finally:
+        session.close()
 
 
 from services.data_quality_service import DataQualityService
